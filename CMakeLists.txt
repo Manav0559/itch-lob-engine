@@ -31,6 +31,13 @@ add_executable(replay src/replay_main.cpp)
 target_link_libraries(replay PRIVATE itch ZLIB::ZLIB)
 target_compile_options(replay PRIVATE ${PROJECT_WARNINGS})
 
+# OrderBook vs LadderBook latency harness (see bench/README.md). Not part of
+# `ctest` — it's a manual-run benchmark, not a correctness check — but it
+# builds under the same warning-as-error bar as everything else.
+add_executable(bench bench/bench_main.cpp)
+target_link_libraries(bench PRIVATE itch)
+target_compile_options(bench PRIVATE ${PROJECT_WARNINGS})
+
 include(FetchContent)
 FetchContent_Declare(
   Catch2
@@ -48,6 +55,8 @@ add_executable(unit_tests
   tests/test_exec_vwap.cpp
   tests/test_exec_pov.cpp
   tests/test_io.cpp
+  tests/test_fill_sim.cpp
+  tests/test_full_day_invariants.cpp
 )
 target_link_libraries(unit_tests PRIVATE itch exec ZLIB::ZLIB Catch2::Catch2WithMain)
 target_compile_options(unit_tests PRIVATE ${PROJECT_WARNINGS})
