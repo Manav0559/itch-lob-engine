@@ -35,7 +35,7 @@ target_compile_options(replay PRIVATE ${PROJECT_WARNINGS})
 # `ctest` — it's a manual-run benchmark, not a correctness check — but it
 # builds under the same warning-as-error bar as everything else.
 add_executable(bench bench/bench_main.cpp)
-target_link_libraries(bench PRIVATE itch)
+target_link_libraries(bench PRIVATE itch ZLIB::ZLIB)
 target_compile_options(bench PRIVATE ${PROJECT_WARNINGS})
 
 include(FetchContent)

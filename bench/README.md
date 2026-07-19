@@ -6,9 +6,10 @@ Head-to-head latency harness for `book::OrderBook` (`std::map` ladders) vs
 ## Running
 
 ```bash
-g++ -std=c++20 -O2 -Wall -Wextra -Wpedantic -Werror -Iinclude bench/bench_main.cpp -o /tmp/bench_main
-/tmp/bench_main               # synthetic session (deterministic, no data file needed)
-/tmp/bench_main /path/to/day  # real NASDAQ ITCH file instead, mmap'd
+cmake --build build --target bench
+./build/bench                              # synthetic session (deterministic, no data file needed)
+./build/bench /path/to/day.NASDAQ_ITCH50    # real, already-uncompressed file — mmap'd
+./build/bench /path/to/day.NASDAQ_ITCH50.gz # real, gzipped file — streamed, never fully materialized
 ```
 
 Run from the repo root — it writes `bench/results.csv` relative to the
@@ -18,8 +19,14 @@ Absent a file argument, `bench_main` generates a fixed-seed synthetic
 session (2.2M+ messages across 9 symbols, realistic message-type mix) using
 the same mirror encoders the unit tests and `replay --selftest` use, so the
 numbers below are reproducible by anyone who clones the repo without needing
-an exchange data file. Pass a real day file (as accepted by `replay`, mmap'd
-the same way) to benchmark against actual data instead.
+an exchange data file.
+
+For a real file, `.gz` inputs are re-read and re-inflated from disk once per
+pass (same bounded, few-MB-at-a-time chunked `inflate` as `replay`'s gzip
+path) rather than decompressed once and replayed from memory: a real NASDAQ
+day can run to multi-GB uncompressed, well past what fits comfortably
+alongside everything else on a memory-constrained dev machine. An
+already-uncompressed real file is still mmap'd directly, same as before.
 
 Each book type gets one discarded warm-up pass followed by three measured
 passes against fresh books; percentiles are computed over the combined

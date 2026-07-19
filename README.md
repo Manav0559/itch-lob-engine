@@ -70,12 +70,12 @@ cmake --build build --target bench && ./build/bench && python3 bench/plot.py
 
   | type | OrderBook p50 | LadderBook p50 | OrderBook p99.9 | LadderBook p99.9 |
   |------|--------------:|---------------:|----------------:|-----------------:|
-  | A    | 125 ns        | 42 ns          | 11,167 ns       | 1,375 ns         |
-  | E    | 292 ns        | 167 ns         | 16,958 ns       | 2,459 ns         |
-  | C    | 292 ns        | 167 ns         | 18,334 ns       | 3,417 ns         |
-  | X    | 292 ns        | 167 ns         | 17,709 ns       | 2,792 ns         |
-  | D    | 375 ns        | 250 ns         | 22,083 ns       | 5,666 ns         |
-  | U    | 500 ns        | 333 ns         | 29,667 ns       | 8,000 ns         |
+  | A    | 84 ns         | 42 ns          | 1,208 ns        | 625 ns           |
+  | E    | 167 ns        | 125 ns         | 1,042 ns        | 792 ns           |
+  | C    | 167 ns        | 125 ns         | 1,000 ns        | 750 ns           |
+  | X    | 167 ns        | 125 ns         | 1,000 ns        | 750 ns           |
+  | D    | 209 ns        | 167 ns         | 1,916 ns        | 1,208 ns         |
+  | U    | 333 ns        | 250 ns         | 2,666 ns        | 1,459 ns         |
 
   Full distributions and plots: [bench/results.csv](bench/results.csv),
   [bench/plots/](bench/plots/). `std::map`'s tail is dominated by

@@ -18,6 +18,7 @@
 
 #include "book/ladder_book.hpp"
 #include "book/order_book.hpp"
+#include "io/gzip_source.hpp"
 #include "io/mmap_source.hpp"
 #include "itch/encode.hpp"
 #include "itch/parser.hpp"
@@ -318,6 +319,26 @@ PassResult<BookType> run_pass(const std::uint8_t* data, std::size_t len) {
     return result;
 }
 
+// Same measurement, sourced from a .gz file re-read and re-inflated from
+// disk for this one pass, instead of a buffer already resident in memory.
+// This machine has 8GB RAM — decompressing a real multi-GB day once and
+// keeping it around for repeated passes (the way the synthetic/mmap path
+// does) isn't safe here, so each pass pays the decompression cost again in
+// exchange for never needing the full day resident anywhere. GzipSource's
+// own chunked inflate loop keeps this pass's memory footprint at a few MB
+// regardless of file size, same as replay_main's --gz path.
+template <typename BookType>
+PassResult<BookType> run_pass_gz(const std::string& path) {
+    BookStore<BookType> store;
+    PassResult<BookType> result;
+    BenchHandler<BookType> h{store, result.lat};
+    io::GzipSource src(path);
+    src.run(h);
+    result.unknown_refs = h.unknown_refs;
+    result.book_count = store.book_count();
+    return result;
+}
+
 struct CsvRow {
     std::string book_type;
     std::string message_type;
@@ -334,6 +355,23 @@ std::uint64_t percentile_sorted(const std::vector<std::uint64_t>& sorted, double
 }
 
 constexpr int kMeasuredPasses = 3;
+
+void finalize_rows(const char* name, const LatBuckets& agg, std::vector<CsvRow>& rows) {
+    for (char t : kMsgTypes) {
+        const std::vector<std::uint64_t>& bucket = agg[static_cast<unsigned char>(t)];
+        if (bucket.empty()) continue;
+        std::vector<std::uint64_t> v = bucket;  // agg is shared read-only; sort a copy
+        std::sort(v.begin(), v.end());
+        CsvRow row;
+        row.book_type = name;
+        row.message_type = std::string(1, t);
+        row.count = v.size();
+        row.p50 = percentile_sorted(v, 0.50);
+        row.p99 = percentile_sorted(v, 0.99);
+        row.p999 = percentile_sorted(v, 0.999);
+        rows.push_back(row);
+    }
+}
 
 template <typename BookType>
 void run_book_type(const char* name, const std::uint8_t* data, std::size_t len,
@@ -354,20 +392,29 @@ void run_book_type(const char* name, const std::uint8_t* data, std::size_t len,
     }
     std::printf("[%s] warm-up + %d measured passes done (books=%zu, unknown_refs=%llu)\n", name,
                kMeasuredPasses, book_count, static_cast<unsigned long long>(total_unknown));
+    finalize_rows(name, agg, rows);
+}
 
-    for (char t : kMsgTypes) {
-        std::vector<std::uint64_t>& v = agg[static_cast<unsigned char>(t)];
-        if (v.empty()) continue;
-        std::sort(v.begin(), v.end());
-        CsvRow row;
-        row.book_type = name;
-        row.message_type = std::string(1, t);
-        row.count = v.size();
-        row.p50 = percentile_sorted(v, 0.50);
-        row.p99 = percentile_sorted(v, 0.99);
-        row.p999 = percentile_sorted(v, 0.999);
-        rows.push_back(row);
+// .gz variant: re-reads and re-inflates the file from disk for every pass
+// (see run_pass_gz) instead of replaying a resident buffer. Slower per pass,
+// bounded memory regardless of day size — the right tradeoff on an 8GB
+// machine benchmarking a multi-GB real feed.
+template <typename BookType>
+void run_book_type_gz(const char* name, const std::string& path, std::vector<CsvRow>& rows) {
+    { auto warm = run_pass_gz<BookType>(path); (void)warm; }
+
+    LatBuckets agg{};
+    std::uint64_t total_unknown = 0;
+    std::size_t book_count = 0;
+    for (int p = 0; p < kMeasuredPasses; ++p) {
+        auto r = run_pass_gz<BookType>(path);
+        merge_into(agg, r.lat);
+        total_unknown += r.unknown_refs;
+        book_count = r.book_count;
     }
+    std::printf("[%s] warm-up + %d measured passes done (books=%zu, unknown_refs=%llu)\n", name,
+               kMeasuredPasses, book_count, static_cast<unsigned long long>(total_unknown));
+    finalize_rows(name, agg, rows);
 }
 
 void print_table(const std::vector<CsvRow>& rows) {
@@ -395,17 +442,31 @@ int main(int argc, char** argv) {
     const std::uint8_t* data = nullptr;
     std::size_t len = 0;
     bool synthetic = true;
+    bool is_gz = false;
+    std::string gz_path;
 
     if (argc >= 2) {
-        try {
-            mmap_src.emplace(argv[1]);
-            data = mmap_src->data();
-            len = mmap_src->size();
+        const std::string path = argv[1];
+        is_gz = path.size() >= 3 && path.compare(path.size() - 3, 3, ".gz") == 0;
+        if (is_gz) {
+            // Deliberately not mmap'd or buffered: a real full day can run
+            // to multi-GB uncompressed, well past what fits alongside
+            // everything else on an 8GB machine. Each pass streams+inflates
+            // straight from the compressed file (see run_pass_gz) instead.
+            gz_path = path;
             synthetic = false;
-            std::printf("real data file: %s (%zu bytes)\n", argv[1], len);
-        } catch (const std::exception& e) {
-            std::fprintf(stderr, "warning: cannot open '%s' (%s); falling back to synthetic\n",
-                        argv[1], e.what());
+            std::printf("real data file (gzip-streamed, re-read per pass): %s\n", path.c_str());
+        } else {
+            try {
+                mmap_src.emplace(path);
+                data = mmap_src->data();
+                len = mmap_src->size();
+                synthetic = false;
+                std::printf("real data file: %s (%zu bytes)\n", path.c_str(), len);
+            } catch (const std::exception& e) {
+                std::fprintf(stderr, "warning: cannot open '%s' (%s); falling back to synthetic\n",
+                            path.c_str(), e.what());
+            }
         }
     }
 
@@ -416,12 +477,19 @@ int main(int argc, char** argv) {
         data = owned_buf.data();
         len = owned_buf.size();
     }
-    std::printf("replaying %zu bytes, %d warm-up + %d measured passes per book type\n\n", len, 1,
-               kMeasuredPasses);
 
     std::vector<CsvRow> rows;
-    run_book_type<book::OrderBook>("OrderBook", data, len, rows);
-    run_book_type<book::LadderBook>("LadderBook", data, len, rows);
+    if (is_gz) {
+        std::printf("gzip-streaming, %d warm-up + %d measured passes per book type\n\n", 1,
+                   kMeasuredPasses);
+        run_book_type_gz<book::OrderBook>("OrderBook", gz_path, rows);
+        run_book_type_gz<book::LadderBook>("LadderBook", gz_path, rows);
+    } else {
+        std::printf("replaying %zu bytes, %d warm-up + %d measured passes per book type\n\n", len,
+                   1, kMeasuredPasses);
+        run_book_type<book::OrderBook>("OrderBook", data, len, rows);
+        run_book_type<book::LadderBook>("LadderBook", data, len, rows);
+    }
 
     print_table(rows);
     write_csv(rows, "bench/results.csv");
