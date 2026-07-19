@@ -17,8 +17,18 @@ set(PROJECT_WARNINGS -Wall -Wextra -Wpedantic -Werror)
 add_library(itch INTERFACE)
 target_include_directories(itch INTERFACE ${CMAKE_CURRENT_SOURCE_DIR}/include)
 
+# Execution layer (TWAP/VWAP/POV) — header-only, same as itch. Twap/Vwap/Pov
+# all live under include/exec/; unit_tests links this and instantiates them.
+add_library(exec INTERFACE)
+target_include_directories(exec INTERFACE ${CMAKE_CURRENT_SOURCE_DIR}/include)
+target_link_libraries(exec INTERFACE itch)
+
+# ZLIB backs the gzip-streaming input path (include/io/gzip_source.hpp),
+# needed by both the replay binary (.gz day files) and its unit test.
+find_package(ZLIB REQUIRED)
+
 add_executable(replay src/replay_main.cpp)
-target_link_libraries(replay PRIVATE itch)
+target_link_libraries(replay PRIVATE itch ZLIB::ZLIB)
 target_compile_options(replay PRIVATE ${PROJECT_WARNINGS})
 
 include(FetchContent)
@@ -30,8 +40,16 @@ FetchContent_Declare(
 FetchContent_MakeAvailable(Catch2)
 
 enable_testing()
-add_executable(unit_tests tests/test_parser.cpp tests/test_book.cpp)
-target_link_libraries(unit_tests PRIVATE itch Catch2::Catch2WithMain)
+add_executable(unit_tests
+  tests/test_parser.cpp
+  tests/test_book.cpp
+  tests/test_ladder_book.cpp
+  tests/test_exec_twap.cpp
+  tests/test_exec_vwap.cpp
+  tests/test_exec_pov.cpp
+  tests/test_io.cpp
+)
+target_link_libraries(unit_tests PRIVATE itch exec ZLIB::ZLIB Catch2::Catch2WithMain)
 target_compile_options(unit_tests PRIVATE ${PROJECT_WARNINGS})
 
 list(APPEND CMAKE_MODULE_PATH ${catch2_SOURCE_DIR}/extras)
