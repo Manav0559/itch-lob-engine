@@ -31,3 +31,23 @@ jobs:
 
       - name: Test
         run: ctest --test-dir build --output-on-failure
+
+      - name: Build bench
+        run: cmake --build build --parallel --target bench
+
+      - name: Run benchmark
+        run: ./build/bench
+
+      - name: Check performance budget
+        # Hard-fails only if LadderBook's measured advantage over OrderBook
+        # regresses past bench/check_budget.py's ratio threshold — see
+        # bench/BUDGET.md for why this is a same-run ratio check, not an
+        # absolute-nanosecond one (CI runners are noisy/shared machines).
+        # Drift warnings (informational, never fail the build) need
+        # bench/ci_history.csv to accumulate real numbers over time; that
+        # part of bench/CI_INTEGRATION.md's recommendation (auto-commit
+        # history back to main from CI) is deliberately not wired in here,
+        # since it requires granting the workflow push permissions — record
+        # history manually (`python3 bench/check_budget.py record`) after a
+        # performance-sensitive change instead, if desired.
+        run: python3 bench/check_budget.py check

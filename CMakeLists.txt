@@ -27,9 +27,33 @@ target_link_libraries(exec INTERFACE itch)
 # needed by both the replay binary (.gz day files) and its unit test.
 find_package(ZLIB REQUIRED)
 
+# Threads backs the multi-threaded pipeline (pipeline/spsc_queue.hpp) and the
+# multicast demo's background sender thread in tests.
+find_package(Threads REQUIRED)
+
 add_executable(replay src/replay_main.cpp)
 target_link_libraries(replay PRIVATE itch ZLIB::ZLIB)
 target_compile_options(replay PRIVATE ${PROJECT_WARNINGS})
+
+# Comparison binary: same replay, decoupled into a parser thread and a
+# book-builder thread joined by a lock-free SPSC queue instead of one thread
+# doing both inline. replay.cpp itself is untouched aside from sharing its
+# BookBuilder via pipeline/dispatch_to_book.hpp.
+add_executable(replay_threaded src/replay_threaded_main.cpp)
+target_link_libraries(replay_threaded PRIVATE itch ZLIB::ZLIB Threads::Threads)
+target_compile_options(replay_threaded PRIVATE ${PROJECT_WARNINGS})
+
+# Toy UDP multicast feed handler + companion synthetic sender — a scoped
+# proof-of-concept of the delivery MECHANISM real ITCH feeds use (see
+# include/net/multicast_receiver.hpp for the explicit MoldUDP64 scope note),
+# not a network protocol implementation.
+add_executable(live_replay src/live_replay_main.cpp)
+target_link_libraries(live_replay PRIVATE itch)
+target_compile_options(live_replay PRIVATE ${PROJECT_WARNINGS})
+
+add_executable(multicast_sender src/multicast_sender_main.cpp)
+target_link_libraries(multicast_sender PRIVATE itch)
+target_compile_options(multicast_sender PRIVATE ${PROJECT_WARNINGS})
 
 # OrderBook vs LadderBook latency harness (see bench/README.md). Not part of
 # `ctest` — it's a manual-run benchmark, not a correctness check — but it
@@ -54,11 +78,16 @@ add_executable(unit_tests
   tests/test_exec_twap.cpp
   tests/test_exec_vwap.cpp
   tests/test_exec_pov.cpp
+  tests/test_exec_almgren_chriss.cpp
   tests/test_io.cpp
   tests/test_fill_sim.cpp
   tests/test_full_day_invariants.cpp
+  tests/test_spsc_queue.cpp
+  tests/test_replay_threaded.cpp
+  tests/test_multicast_receiver.cpp
 )
-target_link_libraries(unit_tests PRIVATE itch exec ZLIB::ZLIB Catch2::Catch2WithMain)
+target_link_libraries(unit_tests PRIVATE itch exec ZLIB::ZLIB Threads::Threads
+                                          Catch2::Catch2WithMain)
 target_compile_options(unit_tests PRIVATE ${PROJECT_WARNINGS})
 
 list(APPEND CMAKE_MODULE_PATH ${catch2_SOURCE_DIR}/extras)

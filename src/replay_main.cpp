@@ -1,4 +1,3 @@
-#include <array>
 #include <chrono>
 #include <cstdint>
 #include <cstdio>
@@ -6,54 +5,17 @@
 #include <exception>
 #include <fstream>
 #include <string>
-#include <unordered_map>
 #include <vector>
 
-#include "book/order_book.hpp"
 #include "io/gzip_source.hpp"
 #include "io/mmap_source.hpp"
 #include "itch/encode.hpp"
 #include "itch/parser.hpp"
+#include "pipeline/dispatch_to_book.hpp"
 
 namespace {
 
-// Routes decoded events into one OrderBook per stock locate and keeps
-// per-type counts. Unknown order refs are counted, not fatal: on a partial
-// replay (or a corrupt file) they tell you how out-of-sync the book is.
-struct BookBuilder {
-    std::unordered_map<std::uint16_t, book::OrderBook> books;
-    std::array<std::uint64_t, 256> counts{};
-    std::uint64_t unknown_refs = 0;
-
-    void bump(char t) { ++counts[static_cast<unsigned char>(t)]; }
-
-    void on_add(const itch::AddOrder& m) {
-        bump('A');
-        if (!books[m.hdr.locate].add(m.ref, m.side, m.shares, m.price)) ++unknown_refs;
-    }
-    void on_execute(const itch::OrderExecuted& m) {
-        bump('E');
-        if (!books[m.hdr.locate].execute(m.ref, m.shares)) ++unknown_refs;
-    }
-    void on_execute_price(const itch::OrderExecutedPrice& m) {
-        bump('C');
-        if (!books[m.hdr.locate].execute(m.ref, m.shares)) ++unknown_refs;
-    }
-    void on_cancel(const itch::OrderCancel& m) {
-        bump('X');
-        if (!books[m.hdr.locate].cancel(m.ref, m.canceled)) ++unknown_refs;
-    }
-    void on_delete(const itch::OrderDelete& m) {
-        bump('D');
-        if (!books[m.hdr.locate].remove(m.ref)) ++unknown_refs;
-    }
-    void on_replace(const itch::OrderReplace& m) {
-        bump('U');
-        if (!books[m.hdr.locate].replace(m.orig_ref, m.new_ref, m.shares, m.price))
-            ++unknown_refs;
-    }
-    void on_other(char type, std::size_t) { bump(type); }
-};
+using pipeline::BookBuilder;
 
 void report(const BookBuilder& h, std::size_t bytes, std::size_t frames, double secs) {
     std::size_t open_orders = 0, bid_levels = 0, ask_levels = 0;

@@ -49,6 +49,28 @@ cmake --build build --target bench && ./build/bench && python3 bench/plot.py
       `ChildOrder`s against a replayed quote/tape (realized fill price, VWAP,
       fill rate) — see the scope notes in `include/exec/fill_sim.hpp` for what
       this lightweight model does and doesn't model (no resting/partial fills)
+- [x] Multi-threaded pipeline (`replay_threaded`): parsing and book-building
+      decoupled onto separate threads joined by a lock-free SPSC queue
+      (`include/pipeline/spsc_queue.hpp`), instead of one thread doing both —
+      produces identical book state to `replay`, and reports max queue
+      occupancy as a backpressure indicator
+- [x] Live UDP multicast feed handler (`live_replay` + `multicast_sender`): a
+      scoped proof-of-concept of how real ITCH is actually delivered
+      (multicast, not files) — deliberately not a MoldUDP64 implementation;
+      see `include/net/multicast_receiver.hpp` for the explicit scope boundary
+- [x] Almgren-Chriss optimal-execution strategy (`include/exec/almgren_chriss.hpp`):
+      a risk-averse, front-loaded trade trajectory alongside Twap/Vwap/Pov's
+      simpler schedules
+- [x] CI-enforced performance budget (`bench/check_budget.py`): a same-run
+      ratio gate (LadderBook must stay meaningfully faster than OrderBook)
+      that's robust to noisy CI machines, plus an informational drift warning
+      against rolling CI history — see `bench/BUDGET.md`
+- [x] Cross-platform hardware-counter profiling (`bench/hw_profile.sh`):
+      `perf stat` on Linux, an honest smaller subset (`/usr/bin/time -l`) on
+      macOS where userspace PMU access isn't available — see
+      `bench/HARDWARE_PROFILING.md`
+- [x] [Devlog: OrderBook vs. LadderBook](docs/devlog-orderbook-vs-ladderbook.md) —
+      the tree-vs-array tradeoff, written up with the real measured numbers
 
 ## Design notes
 
@@ -117,6 +139,29 @@ whole-file-into-memory path for A/B comparison on small files.
 The replay reports frames parsed, per-type counts, books built, open orders,
 and unknown-ref counts (which should be zero on an intact file from the start
 of day).
+
+## Other binaries
+
+```bash
+./build/replay_threaded --selftest   # same replay, parser + book-builder on separate threads
+```
+
+`replay_threaded` accepts the same `<file>` / `--legacy <file>` / `--selftest`
+arguments as `replay` and produces identical book state — it's a comparison
+binary for the decoupled-pipeline design, not a replacement, and additionally
+reports max SPSC queue occupancy as a backpressure indicator.
+
+```bash
+./build/live_replay 239.255.0.1 12345 5 &     # join a multicast group, report every 5 frames
+./build/multicast_sender 239.255.0.1 12345    # send a synthetic session to it
+```
+
+A scoped proof-of-concept of live delivery (real ITCH is distributed over UDP
+multicast, wrapped in NASDAQ's MoldUDP64 session protocol) — this demo
+assumes no packet loss and skips MoldUDP64's sequencing/gap-fill, which is
+explicitly out of scope; see `include/net/multicast_receiver.hpp`.
+`live_replay` runs until interrupted (Ctrl-C / `SIGINT`) since a live feed has
+no natural end.
 
 ## License
 
