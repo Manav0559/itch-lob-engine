@@ -184,9 +184,37 @@ cache/branch-attributed one; a Linux `perf stat` run would be needed to say
 whether that IPC is limited by cache misses, branch mispredicts, or
 something else.
 
-No Linux `perf stat` example is included above. This environment had no
-Linux host or container with `perf` available to run against, and rather
-than fabricate plausible-looking counter values, this section only shows
-runs that were actually captured. Fill this section in with real `perf
-stat` output the first time this script runs on Linux (CI, once wired up
-per the recommendation above, or a local Linux box/container).
+No Linux `perf stat` example with real counter values is included above,
+and that absence was checked rather than assumed. A Linux container
+(`ubuntu:24.04` under OrbStack, this machine's Docker backend) was
+available and `linux-tools-generic` installed cleanly in it, so `perf` was
+actually run:
+
+```
+$ perf stat -e cycles,instructions,cache-misses -- ls /
+ Performance counter stats for 'ls /':
+
+   <not supported>      cycles
+   <not supported>      instructions
+   <not supported>      cache-misses
+
+       0.002525539 seconds time elapsed
+```
+
+`perf_event_open` itself works here -- no permission error, and setting
+`kernel.perf_event_paranoid=-1` (ruling out a paranoid-level restriction)
+changed nothing. The counters read `<not supported>` because this "Linux
+host" is itself a VM guest running on Apple Silicon, and Apple's
+virtualization stack (what OrbStack/Docker Desktop sits on) does not pass
+PMU access through to the guest kernel -- the same underlying restriction
+as native macOS, one layer down. This is a genuinely useful negative
+result, not a dead end: it means the Linux path in `hw_profile.sh` needs
+real Linux CI on non-Apple-Silicon-virtualized hardware to produce
+meaningful numbers -- e.g. GitHub Actions' `ubuntu-latest` runners, which
+run on infrastructure that does expose real PMU counters to `perf stat`.
+A Docker container on an Apple Silicon Mac is not a substitute for that,
+regardless of how "Linux" the guest looks.
+
+Fill this section in with real `perf stat` output the first time this
+script runs somewhere with actual PMU passthrough -- CI once wired up per
+the recommendation above, or a bare-metal/cloud Linux box.
