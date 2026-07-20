@@ -111,10 +111,10 @@ public:
         // price and shares are each uint32_t; their product fits in
         // uint64_t with room to spare (max 4294967295^2 < 2^64 - 1), unlike
         // FillSimulator's notional_ accumulator (fill_sim.hpp) which sums
-        // that product across many fills and needs unsigned __int128 to
-        // stay safe over a full day. A single order's notional doesn't need
-        // that — same widen-before-multiply discipline as exec::Vwap/Pov,
-        // just to the narrower width this one multiply actually requires.
+        // that product across many fills and needs UInt128 (exec/types.hpp)
+        // to stay safe over a full day. A single order's notional doesn't
+        // need that — same widen-before-multiply discipline as exec::Vwap/
+        // Pov, just to the narrower width this one multiply actually requires.
         const std::uint64_t order_notional =
             static_cast<std::uint64_t>(order.price) * static_cast<std::uint64_t>(order.shares);
         if (order_notional > limits_.max_order_notional) return RejectReason::NotionalTooLarge;
@@ -136,8 +136,8 @@ public:
             tripped_ = true;
             return RejectReason::CumulativeSharesExceeded;
         }
-        if (cumulative_notional_ + static_cast<unsigned __int128>(order_notional) >
-            static_cast<unsigned __int128>(limits_.max_cumulative_notional)) {
+        if (cumulative_notional_ + static_cast<UInt128>(order_notional) >
+            static_cast<UInt128>(limits_.max_cumulative_notional)) {
             tripped_ = true;
             return RejectReason::CumulativeNotionalExceeded;
         }
@@ -152,8 +152,7 @@ public:
     // not a second gate.
     void record(const ChildOrder& order) {
         cumulative_shares_ += order.shares;
-        cumulative_notional_ +=
-            static_cast<unsigned __int128>(order.price) * static_cast<unsigned __int128>(order.shares);
+        cumulative_notional_ += static_cast<UInt128>(order.price) * static_cast<UInt128>(order.shares);
     }
 
     bool tripped() const { return tripped_; }
@@ -185,7 +184,7 @@ private:
     // silent-wraparound bug the rest of exec/ widens against before
     // multiplying (see exec::Vwap, exec::Pov, FillSimulator::notional_).
     std::uint64_t cumulative_shares_ = 0;
-    unsigned __int128 cumulative_notional_ = 0;
+    UInt128 cumulative_notional_ = 0;
 };
 
 static_assert(std::is_trivially_copyable_v<RiskLimits>);

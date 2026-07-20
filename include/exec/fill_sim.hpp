@@ -134,12 +134,11 @@ public:
         if (!fills_.push(Fill{order.ts, order.side, fill_price, order.shares})) return false;
 
         shares_filled_ += order.shares;
-        // Widen to unsigned __int128 before the multiply, same
+        // Widen to UInt128 (see exec/types.hpp) before the multiply, same
         // overflow-safety pattern as exec::Vwap/exec::Pov: price and shares
         // are each uint32_t, so their product alone can already exceed
         // uint64_t headroom once summed across a full day's fills.
-        notional_ += static_cast<unsigned __int128>(fill_price) *
-                     static_cast<unsigned __int128>(order.shares);
+        notional_ += static_cast<UInt128>(fill_price) * static_cast<UInt128>(order.shares);
         return true;
     }
 
@@ -170,7 +169,7 @@ private:
     FillQueue fills_;
     Shares shares_filled_ = 0;
     Shares shares_attempted_ = 0;
-    unsigned __int128 notional_ = 0;  // sum(price * shares) over every fill
+    UInt128 notional_ = 0;  // sum(price * shares) over every fill
 };
 
 }  // namespace exec

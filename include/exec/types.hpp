@@ -22,6 +22,27 @@ using Price = std::uint32_t;
 using Shares = std::uint32_t;
 using Timestamp = std::uint64_t;  // ns since midnight, same clock as itch::Header::timestamp
 
+// unsigned __int128 is a GCC/Clang extension, not an ISO C++ type — this
+// project's -Wpedantic (part of -Wall -Wextra -Wpedantic -Werror) rejects
+// the literal token `__int128` at every point it appears in a translation
+// unit. AppleClang's -Wpedantic does not flag it, which is exactly why this
+// went unnoticed locally and only surfaced on the Linux (GCC) CI runner.
+// Several places genuinely need >64 bits of headroom (summing price*shares
+// across a whole session, or a large total_shares times a large elapsed-time
+// delta, can each exceed 2^64) and both compilers this project's CI matrix
+// actually targets support the extension identically — so the pragma is
+// isolated to this one declaration instead of repeated at every call site,
+// and everything downstream just names UInt128, never the raw extension
+// keyword, so the warning has nothing left to fire on.
+#if defined(__GNUC__) || defined(__clang__)
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wpedantic"
+using UInt128 = unsigned __int128;
+#pragma GCC diagnostic pop
+#else
+#error "This codebase requires a compiler with a 128-bit integer extension (GCC or Clang)."
+#endif
+
 // Upper bounds for the fixed-size containers below. A schedule or queue
 // that needs more than this is a sizing bug at construction time, not a
 // reason to reach for std::vector — see Twap's constructor.

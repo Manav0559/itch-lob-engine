@@ -37,8 +37,8 @@ struct VwapParams {
 //
 // All arithmetic is integer: target_shares(now) multiplies total_shares (up
 // to 2^32-1) by an elapsed-time delta that can itself span most of a
-// trading day in nanoseconds, so the product is computed in
-// unsigned __int128 before dividing back down to Shares — a plain
+// trading day in nanoseconds, so the product is computed in UInt128 (see
+// exec/types.hpp) before dividing back down to Shares — a plain
 // std::uint64_t product overflows well within realistic inputs.
 class Vwap : public ExecutionStrategy<Vwap> {
 public:
@@ -84,14 +84,13 @@ public:
 
 private:
     // target_shares(now) = total_shares * (now - start_ts) / (end_ts -
-    // start_ts), widened to unsigned __int128 for the multiply so a large
-    // total_shares times a large elapsed-time delta cannot wrap a 64-bit
-    // accumulator before the division brings it back into Shares range.
+    // start_ts), widened to UInt128 (see exec/types.hpp) for the multiply so
+    // a large total_shares times a large elapsed-time delta cannot wrap a
+    // 64-bit accumulator before the division brings it back into Shares range.
     Shares target_shares(Timestamp now) const {
         const Timestamp elapsed = now - params_.start_ts;
         const Timestamp span = params_.end_ts - params_.start_ts;
-        const unsigned __int128 target =
-            static_cast<unsigned __int128>(params_.total_shares) * elapsed / span;
+        const UInt128 target = static_cast<UInt128>(params_.total_shares) * elapsed / span;
         return target >= params_.total_shares
                    ? params_.total_shares
                    : static_cast<Shares>(target);
