@@ -54,7 +54,13 @@ struct QueueProducer {
     // (bare tag, no payload) so the consumer's counts stay a complete
     // picture, owned by one thread, rather than splitting bookkeeping
     // across both.
-    void on_other(char type, std::size_t) { push_spin(Envelope{.type = type}); }
+    // GCC's -Wmissing-field-initializers fires on a designated-initializer
+    // aggregate that names `.type` but leaves Envelope's anonymous union
+    // unlisted (AppleClang doesn't warn on this — caught by the Linux CI
+    // runner). Naming `.add = {}` explicitly satisfies it without changing
+    // behavior: the union's active member is irrelevant for a skipped/
+    // corrupt frame, which carries no payload either way.
+    void on_other(char type, std::size_t) { push_spin(Envelope{.type = type, .add = {}}); }
 };
 
 struct ConsumerResult {

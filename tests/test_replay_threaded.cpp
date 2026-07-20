@@ -76,7 +76,9 @@ struct TestProducer {
     void on_replace(const itch::OrderReplace& m) {
         push_spin(Envelope{.type = 'U', .replace = m});
     }
-    void on_other(char type, std::size_t) { push_spin(Envelope{.type = type}); }
+    // See include/pipeline/threaded_replay.hpp's on_other for why `.add = {}`
+    // is spelled out explicitly (GCC-only -Wmissing-field-initializers).
+    void on_other(char type, std::size_t) { push_spin(Envelope{.type = type, .add = {}}); }
 };
 
 // Replays `data` through a real parser thread + book-builder thread joined
