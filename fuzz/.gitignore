@@ -1,0 +1,8 @@
+fuzz_parser
+fuzz_parser.dSYM/
+generate_corpus
+findings/
+crash-*
+leak-*
+timeout-*
+oom-*
