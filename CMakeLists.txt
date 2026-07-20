@@ -62,6 +62,13 @@ add_executable(bench bench/bench_main.cpp)
 target_link_libraries(bench PRIVATE itch ZLIB::ZLIB)
 target_compile_options(bench PRIVATE ${PROJECT_WARNINGS})
 
+# Single-threaded vs two-thread pipeline throughput/latency comparison (see
+# bench/THREADED_PIPELINE_FINDINGS.md) — same manual-run, not-part-of-ctest
+# treatment as `bench` above.
+add_executable(bench_threaded bench/bench_threaded_main.cpp)
+target_link_libraries(bench_threaded PRIVATE itch ZLIB::ZLIB Threads::Threads)
+target_compile_options(bench_threaded PRIVATE ${PROJECT_WARNINGS})
+
 include(FetchContent)
 FetchContent_Declare(
   Catch2
@@ -85,6 +92,7 @@ add_executable(unit_tests
   tests/test_spsc_queue.cpp
   tests/test_replay_threaded.cpp
   tests/test_multicast_receiver.cpp
+  tests/test_risk_gate.cpp
 )
 target_link_libraries(unit_tests PRIVATE itch exec ZLIB::ZLIB Threads::Threads
                                           Catch2::Catch2WithMain)

@@ -53,7 +53,13 @@ cmake --build build --target bench && ./build/bench && python3 bench/plot.py
       decoupled onto separate threads joined by a lock-free SPSC queue
       (`include/pipeline/spsc_queue.hpp`), instead of one thread doing both —
       produces identical book state to `replay`, and reports max queue
-      occupancy as a backpressure indicator
+      occupancy as a backpressure indicator. **Measured, not assumed, and it
+      does not help here**: `./build/bench_threaded` shows throughput within
+      noise of single-threaded (0.75–1.03x across runs) and a real latency
+      regression under load — see
+      [bench/THREADED_PIPELINE_FINDINGS.md](bench/THREADED_PIPELINE_FINDINGS.md)
+      for why (book-mutation cost dominates parsing cost, leaving little for
+      the queue handoff to hide behind)
 - [x] Live UDP multicast feed handler (`live_replay` + `multicast_sender`): a
       scoped proof-of-concept of how real ITCH is actually delivered
       (multicast, not files) — deliberately not a MoldUDP64 implementation;
@@ -71,6 +77,14 @@ cmake --build build --target bench && ./build/bench && python3 bench/plot.py
       `bench/HARDWARE_PROFILING.md`
 - [x] [Devlog: OrderBook vs. LadderBook](docs/devlog-orderbook-vs-ladderbook.md) —
       the tree-vs-array tradeoff, written up with the real measured numbers
+- [x] Pre-trade risk gate (`include/exec/risk_gate.hpp`): per-order size /
+      notional / price-collar limits plus a latching cumulative kill switch
+      (requires an explicit `reset()` — no automatic self-healing) between a
+      strategy's `ChildOrder` output and wherever orders go next
+- [x] Coverage-guided fuzzing of the ITCH parser (`fuzz/`): libFuzzer +
+      ASan/UBSan against `itch::parse_stream` through a real `OrderBook`, not
+      just decode-in-isolation — 4.6M+ executions across seed runs, clean, no
+      crashes found so far; see [fuzz/README.md](fuzz/README.md)
 
 ## Design notes
 

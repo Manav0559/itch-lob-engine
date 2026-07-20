@@ -1,4 +1,3 @@
-#include <atomic>
 #include <chrono>
 #include <cstdint>
 #include <cstdio>
@@ -6,138 +5,31 @@
 #include <exception>
 #include <fstream>
 #include <string>
-#include <thread>
 #include <vector>
 
 #include "io/gzip_source.hpp"
 #include "io/mmap_source.hpp"
 #include "itch/encode.hpp"
 #include "itch/parser.hpp"
-#include "pipeline/dispatch_to_book.hpp"
-#include "pipeline/message.hpp"
-#include "pipeline/spsc_queue.hpp"
+#include "pipeline/threaded_replay.hpp"
 
 // Alternative to replay_main: the same ITCH replay, decoupled into a parser
 // thread and a book-builder thread joined by a lock-free SPSC queue, instead
 // of one thread doing both inline. This is a comparison binary, not a
-// replacement — replay_main.cpp is untouched.
+// replacement — replay_main.cpp is untouched. The pipeline machinery itself
+// (QueueProducer/consume/run_pipeline) lives in
+// include/pipeline/threaded_replay.hpp, shared with
+// bench/bench_threaded_main.cpp.
 namespace {
 
 using pipeline::BookBuilder;
-using pipeline::Envelope;
+using pipeline::QueueProducer;
+using pipeline::RunStats;
 
 // Arbitrary but generous: large enough that ordinary parse-vs-book-mutation
 // speed differences rarely fill it, so max-occupancy numbers reported below
 // mean something (a queue that's *always* full just measures its own size).
 constexpr std::size_t kQueueCapacity = 1u << 16;
-using Queue = pipeline::SpscQueue<Envelope, kQueueCapacity>;
-
-// Parser-thread handler: matches the itch::dispatch Handler interface
-// exactly (same as BookBuilder does for the single-threaded path), but
-// instead of mutating a book inline, it packages each decoded message into
-// an Envelope and hands it to the book-builder thread over the queue. Since
-// the interface matches, this drops straight into itch::parse_stream /
-// GzipSource::run without any parser-side changes.
-struct QueueProducer {
-    Queue& queue;
-    std::size_t max_occupancy = 0;
-    std::size_t frames = 0;
-
-    // Deliberate simple backpressure: if the queue is full, the book-builder
-    // thread is behind, so spin-yield and retry rather than drop the
-    // message or block on a condvar. A production system would size the
-    // queue from measured backpressure or apply real flow control; that
-    // adaptiveness is out of scope here — the point of this binary is to
-    // *measure* how often backpressure happens (max_occupancy in the
-    // report), not to eliminate it.
-    void push_spin(const Envelope& env) {
-        while (!queue.push(env)) std::this_thread::yield();
-        const std::size_t occ = queue.size();
-        if (occ > max_occupancy) max_occupancy = occ;
-        ++frames;
-    }
-
-    void on_add(const itch::AddOrder& m) { push_spin(Envelope{.type = 'A', .add = m}); }
-    void on_execute(const itch::OrderExecuted& m) {
-        push_spin(Envelope{.type = 'E', .exec = m});
-    }
-    void on_execute_price(const itch::OrderExecutedPrice& m) {
-        push_spin(Envelope{.type = 'C', .exec_price = m});
-    }
-    void on_cancel(const itch::OrderCancel& m) { push_spin(Envelope{.type = 'X', .cancel = m}); }
-    void on_delete(const itch::OrderDelete& m) { push_spin(Envelope{.type = 'D', .del = m}); }
-    void on_replace(const itch::OrderReplace& m) {
-        push_spin(Envelope{.type = 'U', .replace = m});
-    }
-    // Skipped/corrupt frames don't touch any book, but still get pushed
-    // (bare tag, no payload) so the consumer's counts (frames-by-type in the
-    // report) stay a complete picture, owned by one thread, rather than
-    // splitting bookkeeping across both.
-    void on_other(char type, std::size_t) { push_spin(Envelope{.type = type}); }
-};
-
-struct ConsumerResult {
-    BookBuilder builder;
-    std::size_t frames = 0;
-};
-
-// Book-builder thread body: pops envelopes and re-dispatches them into the
-// book via the same BookBuilder on_* methods replay_main.cpp's single
-// thread calls directly. producer_done is checked only after a pop comes up
-// empty, and once it's observed true the queue is drained completely before
-// exiting — the producer can't push anything more after setting it, so a
-// full drain at that point is guaranteed to be the true end of the stream.
-void consume(Queue& queue, const std::atomic<bool>& producer_done, ConsumerResult& result) {
-    Envelope env;
-    while (true) {
-        if (queue.pop(env)) {
-            pipeline::dispatch_to_book(env, result.builder);
-            ++result.frames;
-            continue;
-        }
-        if (producer_done.load(std::memory_order_acquire)) {
-            while (queue.pop(env)) {
-                pipeline::dispatch_to_book(env, result.builder);
-                ++result.frames;
-            }
-            break;
-        }
-        std::this_thread::yield();
-    }
-}
-
-struct RunStats {
-    BookBuilder builder;
-    std::size_t frames = 0;
-    std::size_t max_occupancy = 0;
-};
-
-// Runs `decode` (a callable that walks the input and feeds a QueueProducer)
-// on a dedicated parser thread while a book-builder thread drains the queue
-// concurrently, then joins both. Every RunStats field below is written by
-// exactly one of the two threads and only read here after both threads have
-// joined, so no additional synchronization is needed beyond the join()s and
-// the producer_done flag consume() already uses to know when to stop.
-template <typename Decode>
-RunStats run_pipeline(Decode&& decode) {
-    Queue queue;
-    std::atomic<bool> producer_done{false};
-    QueueProducer producer{queue};
-    ConsumerResult consumer_result;
-
-    std::thread book_builder_thread(consume, std::ref(queue), std::cref(producer_done),
-                                     std::ref(consumer_result));
-    std::thread parser_thread([&] {
-        decode(producer);
-        producer_done.store(true, std::memory_order_release);
-    });
-
-    parser_thread.join();
-    book_builder_thread.join();
-
-    return RunStats{std::move(consumer_result.builder), consumer_result.frames,
-                     producer.max_occupancy};
-}
 
 void report(const BookBuilder& h, std::size_t bytes, std::size_t frames, double secs,
             std::size_t max_occupancy) {
@@ -172,7 +64,8 @@ void report(const BookBuilder& h, std::size_t bytes, std::size_t frames, double 
 
 int run(const std::uint8_t* data, std::size_t len) {
     const auto t0 = std::chrono::steady_clock::now();
-    RunStats stats = run_pipeline([&](QueueProducer& p) { itch::parse_stream(data, len, p); });
+    RunStats stats = pipeline::run_pipeline<kQueueCapacity>(
+        [&](QueueProducer<kQueueCapacity>& p) { itch::parse_stream(data, len, p); });
     const auto t1 = std::chrono::steady_clock::now();
     report(stats.builder, len, stats.frames, std::chrono::duration<double>(t1 - t0).count(),
            stats.max_occupancy);
@@ -182,8 +75,9 @@ int run(const std::uint8_t* data, std::size_t len) {
 int run_mmap(const std::string& path) {
     io::MmapSource src(path);
     const auto t0 = std::chrono::steady_clock::now();
-    RunStats stats =
-        run_pipeline([&](QueueProducer& p) { itch::parse_stream(src.data(), src.size(), p); });
+    RunStats stats = pipeline::run_pipeline<kQueueCapacity>([&](QueueProducer<kQueueCapacity>& p) {
+        itch::parse_stream(src.data(), src.size(), p);
+    });
     const auto t1 = std::chrono::steady_clock::now();
     report(stats.builder, src.size(), stats.frames,
            std::chrono::duration<double>(t1 - t0).count(), stats.max_occupancy);
@@ -193,7 +87,8 @@ int run_mmap(const std::string& path) {
 int run_gzip(const std::string& path) {
     io::GzipSource src(path);
     const auto t0 = std::chrono::steady_clock::now();
-    RunStats stats = run_pipeline([&](QueueProducer& p) { src.run(p); });
+    RunStats stats = pipeline::run_pipeline<kQueueCapacity>(
+        [&](QueueProducer<kQueueCapacity>& p) { src.run(p); });
     const auto t1 = std::chrono::steady_clock::now();
     report(stats.builder, src.bytes_decompressed(), stats.frames,
            std::chrono::duration<double>(t1 - t0).count(), stats.max_occupancy);
