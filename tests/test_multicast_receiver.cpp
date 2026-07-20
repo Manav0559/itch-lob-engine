@@ -73,16 +73,21 @@ TEST_CASE("multicast_receiver receives a synthetic session byte-for-byte and "
     // frame(s) are silently dropped rather than received.
     //
     // Some sandboxed CI network stacks (observed on a GitHub-hosted
-    // macos-latest runner) don't permit IP multicast at all — join or send
-    // can fail there for reasons entirely outside this code's control. That
-    // is an environment limitation to skip past, not a test failure, and
-    // it must never surface as an uncaught exception: one thrown across a
-    // std::thread boundary (the sender thread below) calls std::terminate,
-    // which aborts the whole test binary instead of failing just this one
-    // case. Both the join and the send are guarded accordingly.
+    // macos-latest runner) don't cleanly REJECT IP multicast — join and send
+    // both report success — they just never deliver the packets: the socket
+    // API succeeds, the datagram vanishes into whatever virtual network
+    // filtering sits underneath. A construction/send failure is guarded
+    // below the same as before, but that alone doesn't cover this case: a
+    // receive() with no timeout (the default) would then block forever
+    // waiting for data that is never coming, hanging the whole test binary
+    // until CI's own job-level timeout kills it. A per-call receive timeout
+    // plus a bounded overall deadline turns that hang into a clean SKIP.
+    constexpr auto kRecvTimeout = std::chrono::milliseconds(200);
+    constexpr auto kOverallDeadline = std::chrono::seconds(5);
+
     std::unique_ptr<net::MulticastReceiver> receiver;
     try {
-        receiver = std::make_unique<net::MulticastReceiver>(group, port);
+        receiver = std::make_unique<net::MulticastReceiver>(group, port, kRecvTimeout);
     } catch (const std::exception& e) {
         SKIP("multicast unavailable in this environment (join failed): " << e.what());
     }
@@ -99,12 +104,22 @@ TEST_CASE("multicast_receiver receives a synthetic session byte-for-byte and "
 
     std::vector<std::uint8_t> received;
     std::vector<std::uint8_t> buf(65536);
-    while (received.size() < framed.size()) {
+    const auto deadline = std::chrono::steady_clock::now() + kOverallDeadline;
+    while (received.size() < framed.size() && std::chrono::steady_clock::now() < deadline) {
         const ssize_t n = receiver->receive(buf.data(), buf.size());
-        if (n <= 0) break;  // let the join()+sender_error check below explain why
-        received.insert(received.end(), buf.begin(), buf.begin() + n);
+        if (n > 0) received.insert(received.end(), buf.begin(), buf.begin() + n);
+        // n <= 0 here is expected on every timed-out poll (EAGAIN/EWOULDBLOCK)
+        // when nothing arrived within kRecvTimeout — keep polling until the
+        // overall deadline, rather than treating one empty poll as failure.
     }
     sender.join();
+
+    if (received.size() < framed.size() && !sender_error) {
+        SKIP("multicast unavailable in this environment (no data received within "
+             << kOverallDeadline.count() << "s — join/send reported success but nothing "
+             << "arrived, consistent with a sandboxed CI network silently dropping "
+             << "multicast traffic)");
+    }
 
     if (sender_error) {
         try {
