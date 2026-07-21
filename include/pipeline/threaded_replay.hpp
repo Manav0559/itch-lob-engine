@@ -1,6 +1,7 @@
 #pragma once
 #include <atomic>
 #include <cstddef>
+#include <optional>
 #include <thread>
 #include <utility>
 
@@ -8,6 +9,7 @@
 #include "pipeline/dispatch_to_book.hpp"
 #include "pipeline/message.hpp"
 #include "pipeline/spsc_queue.hpp"
+#include "pipeline/thread_affinity.hpp"
 
 // Reusable parser-thread/book-builder-thread pipeline machinery, factored
 // out of replay_threaded_main.cpp so that bench/bench_threaded_main.cpp can
@@ -102,6 +104,16 @@ struct RunStats {
     std::size_t max_occupancy = 0;
 };
 
+// Optional hard-pin request for the two threads run_pipeline spawns. Both
+// fields default to unset (no pinning attempted) so every existing call site
+// keeps its current behavior unchanged. See pipeline/thread_affinity.hpp for
+// what "pinned" actually means per platform (a real bind on Linux, a
+// best-effort scheduling hint on macOS).
+struct CoreAffinity {
+    std::optional<int> parser_core;
+    std::optional<int> book_builder_core;
+};
+
 // Runs `decode` (a callable that walks the input and feeds a
 // QueueProducer<QueueCapacity>) on a dedicated parser thread while a
 // book-builder thread drains the queue concurrently, then joins both. Every
@@ -115,8 +127,14 @@ struct RunStats {
 // get the faster book automatically; pass it explicitly
 // (`run_pipeline<kQueueCapacity, book::OrderBook>(...)`) to A/B against the
 // std::map baseline instead.
+//
+// affinity is opt-in and defaults to {} (no pinning) - existing call sites
+// need no changes. Pinning happens from inside each thread's own lambda
+// (pin_this_thread_to_core operates on "the calling thread"), before that
+// thread does any real work, so the pin request is in effect for the whole
+// run, not applied after the fact.
 template <std::size_t QueueCapacity, typename BookType = book::LadderBook, typename Decode>
-RunStats<BookType> run_pipeline(Decode&& decode) {
+RunStats<BookType> run_pipeline(Decode&& decode, CoreAffinity affinity = {}) {
     using Queue = SpscQueue<Envelope, QueueCapacity>;
 
     Queue queue;
@@ -124,9 +142,12 @@ RunStats<BookType> run_pipeline(Decode&& decode) {
     QueueProducer<QueueCapacity> producer{queue};
     ConsumerResult<BookType> consumer_result;
 
-    std::thread book_builder_thread(consume<Queue, BookType>, std::ref(queue),
-                                     std::cref(producer_done), std::ref(consumer_result));
+    std::thread book_builder_thread([&] {
+        if (affinity.book_builder_core) pin_this_thread_to_core(*affinity.book_builder_core);
+        consume<Queue, BookType>(queue, producer_done, consumer_result);
+    });
     std::thread parser_thread([&] {
+        if (affinity.parser_core) pin_this_thread_to_core(*affinity.parser_core);
         decode(producer);
         producer_done.store(true, std::memory_order_release);
     });

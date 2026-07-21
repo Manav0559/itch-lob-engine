@@ -73,6 +73,24 @@ jobs:
           echo "all 3 attempts failed the ratio budget — this is a real regression, not noise"
           exit 1
 
+      # Linux-only: pipeline::pin_this_thread_to_core is a REAL hard pin here
+      # (pthread_setaffinity_np), unlike macOS's best-effort scheduling hint
+      # (see pipeline/thread_affinity.hpp) — this is the platform that can
+      # actually answer "does core pinning change the threaded-pipeline
+      # verdict," which local macOS runs (see bench/THREADED_PIPELINE_FINDINGS.md)
+      # could only ever answer with a hint, not a real pin. Informational
+      # only: a hosted CI runner's vCPUs are themselves shared/virtualized, so
+      # even a real pin here is one more noisy data point, not a verdict to
+      # gate the build on — printed to the log for a human to read across
+      # runs over time, same spirit as the budget check's drift warning.
+      - name: Build bench_threaded
+        if: matrix.os == 'ubuntu-latest'
+        run: cmake --build build --parallel --target bench_threaded
+
+      - name: Run threaded-pipeline benchmark (pinned vs. unpinned, informational)
+        if: matrix.os == 'ubuntu-latest'
+        run: ./build/bench_threaded
+
   sanitize:
     name: sanitize (${{ matrix.sanitizer }})
     runs-on: ubuntu-latest

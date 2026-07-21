@@ -1,5 +1,6 @@
 metric,path,count,elapsed_s,messages_per_sec,best_msgs_per_sec,p50_ns,p99_ns,p999_ns,min_ns
-throughput,single_threaded,2200000,0.565873,3.8878e+06,4.67222e+06,0,0,0,0
-throughput,threaded_pipeline,2200000,0.470601,4.67487e+06,4.82138e+06,0,0,0,0
-spsc_roundtrip,envelope_roundtrip_saturated,2200000,0,0,0,1214042,1954542,1966416,125
-spsc_roundtrip,envelope_roundtrip_isolated,2200000,0,0,0,208,791,11291,0
+throughput,single_threaded,2200000,0.356057,6.17879e+06,6.44817e+06,0,0,0,0
+throughput,threaded_pipeline,2200000,0.38757,5.6764e+06,6.69461e+06,0,0,0,0
+throughput,threaded_pinned,2200000,0.364546,6.03491e+06,6.18323e+06,0,0,0,0
+spsc_roundtrip,envelope_roundtrip_saturated,2200000,0,0,0,85625,726875,1796167,83
+spsc_roundtrip,envelope_roundtrip_isolated,2200000,0,0,0,125,417,4125,0
