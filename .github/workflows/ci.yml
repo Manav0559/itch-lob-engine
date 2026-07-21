@@ -243,6 +243,102 @@ jobs:
         if: matrix.sanitizer == 'thread'
         run: ./build-san/unit_tests "[concurrency]"
 
+  coverage:
+    name: coverage (gcc + lcov)
+    runs-on: ubuntu-latest
+
+    # Same scoping reasoning as build-test's job-level `permissions` above:
+    # only this job's own "Commit updated coverage badge" step (push-to-main
+    # only) ever uses write access; sanitize/fuzz-smoke get none.
+    permissions:
+      contents: write
+
+    steps:
+      # fetch-depth: 0 for the same reason as build-test's checkout: the
+      # "Commit updated coverage badge" step's `git pull --rebase` needs
+      # real history to rebase against, not a shallow depth-1 clone.
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install lcov
+        run: sudo apt-get update && sudo apt-get install -y lcov
+
+      # --coverage is GCC's (and Clang's, but this job deliberately uses
+      # ubuntu-latest's default g++ toolchain, not clang++, since gcov/lcov
+      # is the combination lcov is built around) flag for
+      # -fprofile-arcs -ftest-coverage at compile time and linking in
+      # libgcov -- a separate build tree from build/build-debug/build-san,
+      # since instrumented codegen has no business leaking into any of
+      # those. -O0 keeps line hit-counts attributable to source lines
+      # instead of blurred by inlining/reordering.
+      - name: Configure (coverage instrumentation)
+        run: |
+          cmake -B build-coverage -DCMAKE_BUILD_TYPE=Debug \
+            -DCMAKE_CXX_FLAGS="--coverage -O0" \
+            -DCMAKE_EXE_LINKER_FLAGS="--coverage"
+
+      # All targets, not just unit_tests: ctest's replay_selftest case execs
+      # the real `replay` binary (see CMakeLists.txt), and build-test's
+      # build-debug job already sets the precedent that binary needs to
+      # exist in every build directory ctest runs against, not just build/.
+      - name: Build (all targets)
+        run: cmake --build build-coverage --parallel
+
+      # Running the suite is what produces the .gcda files lcov captures
+      # below -- coverage data only exists for code paths this run actually
+      # exercised.
+      - name: Test (collect coverage)
+        run: ctest --test-dir build-coverage --output-on-failure
+
+      # Capture, then filter out everything that isn't this project's own
+      # code: system headers, the FetchContent-vendored Catch2 tree
+      # (_deps/), and the test files themselves -- coverage of test code
+      # isn't the question being answered here, coverage of include/ + src/
+      # by the tests is.
+      - name: Capture coverage with lcov
+        run: |
+          lcov --capture --directory build-coverage \
+            --output-file coverage/lcov.info --rc branch_coverage=1
+          lcov --remove coverage/lcov.info \
+            '/usr/*' '*/_deps/*' '*/tests/*' \
+            --output-file coverage/lcov.filtered.info \
+            --rc branch_coverage=1
+          lcov --list coverage/lcov.filtered.info --rc branch_coverage=1
+
+      # Prints a line/branch coverage table straight to the Actions run's
+      # job summary (visible without opening the README) and writes
+      # coverage/coverage.json, the badge source the next step commits.
+      - name: Compute coverage % and write job summary
+        run: |
+          python3 coverage/make_badge.py coverage/lcov.filtered.info \
+            >> "$GITHUB_STEP_SUMMARY"
+
+      # Push-to-main only, same reasoning as "Commit updated ci_history.csv"
+      # in build-test: a PR from an unmerged (or since-abandoned) branch
+      # shouldn't get to overwrite the badge everyone else sees, and
+      # GITHUB_TOKEN is forced read-only on pull_request runs regardless.
+      - name: Commit updated coverage badge
+        if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add coverage/coverage.json
+          if git diff --staged --quiet; then
+            echo "coverage/coverage.json unchanged, nothing to commit"
+            exit 0
+          fi
+          git commit -m "coverage: update badge for ${GITHUB_SHA::12}"
+          for i in 1 2 3; do
+            if git pull --rebase origin main && git push origin HEAD:main; then
+              exit 0
+            fi
+            echo "push attempt $i failed (likely racing another job's push); retrying"
+            sleep $((RANDOM % 5 + 1))
+          done
+          echo "failed to push coverage/coverage.json after 3 attempts"
+          exit 1
+
   fuzz-smoke:
     name: fuzz smoke test
     runs-on: ubuntu-latest
