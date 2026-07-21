@@ -1,12 +1,15 @@
+#include <chrono>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <exception>
 #include <string>
+#include <string_view>
 #include <vector>
 
 #include "itch/encode.hpp"
+#include "net/moldudp64.hpp"
 #include "net/multicast_test_sender.hpp"
 
 namespace {
@@ -34,26 +37,52 @@ std::vector<std::uint8_t> synthetic_session() {
     });
 }
 
+// Must match live_replay_main.cpp's session id — a MoldUdp64Receiver ignores
+// any packet whose session doesn't match its own.
+constexpr std::string_view kSessionId = "ITCHDEMO01";
+
 }  // namespace
 
 int main(int argc, char** argv) {
     std::string group = "239.255.0.1";
-    std::uint16_t port = 12345;
-    if (argc == 3) {
+    std::uint16_t data_port = 12345;
+    std::uint16_t request_port = 12346;
+    if (argc == 4) {
         group = argv[1];
-        port = static_cast<std::uint16_t>(std::atoi(argv[2]));
+        data_port = static_cast<std::uint16_t>(std::atoi(argv[2]));
+        request_port = static_cast<std::uint16_t>(std::atoi(argv[3]));
     } else if (argc != 1) {
-        std::fprintf(stderr, "usage: %s [group port]\n", argv[0]);
-        std::fprintf(stderr, "  sends one synthetic ITCH session, once, as length-prefixed\n");
-        std::fprintf(stderr, "  frames over UDP multicast (default 239.255.0.1:12345).\n");
+        std::fprintf(stderr, "usage: %s [group data_port request_port]\n", argv[0]);
+        std::fprintf(stderr,
+                     "  sends one synthetic ITCH session as a real MoldUDP64 session (default\n"
+                     "  239.255.0.1:12345, gap-fill request channel on request_port default\n"
+                     "  12346) — one message per packet, sequenced, ending in an end-of-session\n"
+                     "  packet. Stays up for a few seconds afterward to honor any\n"
+                     "  retransmission requests before exiting.\n");
         return 2;
     }
 
     try {
+        net::MoldUdp64Sender sender(group, data_port, request_port,
+                                    net::moldudp64::make_session(kSessionId));
         const std::vector<std::uint8_t> framed = synthetic_session();
-        std::printf("sending %zu bytes (synthetic session) to %s:%u\n", framed.size(),
-                    group.c_str(), port);
-        net::send_multicast_stream(group, port, framed);
+        sender.load(framed);
+        std::printf("sending %zu bytes (synthetic session) to %s:%u (session '%s')\n", framed.size(),
+                    group.c_str(), data_port, std::string(kSessionId).c_str());
+        sender.send_all();
+        std::printf("sent — serving gap-fill requests on port %u for a few seconds before exit\n",
+                    request_port);
+        std::fflush(stdout);
+
+        // A real MoldUDP64 session server stays up for the life of the
+        // session precisely so it can honor retransmission requests; this
+        // demo sender is a one-shot process, so it keeps its request
+        // channel alive for a short grace period afterward instead of
+        // exiting the instant the last datagram is on the wire.
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(3);
+        while (std::chrono::steady_clock::now() < deadline) {
+            sender.serve_one_request(std::chrono::milliseconds(200));
+        }
         std::printf("done\n");
     } catch (const std::exception& e) {
         std::fprintf(stderr, "error: %s\n", e.what());

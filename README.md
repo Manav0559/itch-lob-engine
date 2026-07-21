@@ -87,10 +87,12 @@ cmake --build build --target bench && ./build/bench && python3 bench/plot.py
       overturn a documented conclusion; it needs the same rigor the original
       finding got (multiple runs, ideally with CPU core pinning — see the
       roadmap) before `THREADED_PIPELINE_FINDINGS.md` gets rewritten.
-- [x] Live UDP multicast feed handler (`live_replay` + `multicast_sender`): a
-      scoped proof-of-concept of how real ITCH is actually delivered
-      (multicast, not files) — deliberately not a MoldUDP64 implementation;
-      see `include/net/multicast_receiver.hpp` for the explicit scope boundary
+- [x] Live UDP multicast feed handler (`live_replay` + `multicast_sender`)
+      running NASDAQ's real MoldUDP64 session protocol (session header,
+      sequence numbers, sequence-gap detection, and a retransmission-request
+      gap-fill round trip) — see `include/net/moldudp64.hpp` and
+      `include/net/multicast_receiver.hpp` (`MoldUdp64Receiver`) for the
+      implementation and its documented simplifications versus the full spec
 - [x] Almgren-Chriss optimal-execution strategy (`include/exec/almgren_chriss.hpp`):
       a risk-averse, front-loaded trade trajectory alongside Twap/Vwap/Pov's
       simpler schedules
@@ -206,16 +208,32 @@ binary for the decoupled-pipeline design, not a replacement, and additionally
 reports max SPSC queue occupancy as a backpressure indicator.
 
 ```bash
-./build/live_replay 239.255.0.1 12345 5 &     # join a multicast group, report every 5 frames
-./build/multicast_sender 239.255.0.1 12345    # send a synthetic session to it
+./build/live_replay 239.255.0.1 12345 12346 5 &      # join a MoldUDP64 session, report every 5 frames
+./build/multicast_sender 239.255.0.1 12345 12346     # send a synthetic session to it
 ```
 
-A scoped proof-of-concept of live delivery (real ITCH is distributed over UDP
-multicast, wrapped in NASDAQ's MoldUDP64 session protocol) — this demo
-assumes no packet loss and skips MoldUDP64's sequencing/gap-fill, which is
-explicitly out of scope; see `include/net/multicast_receiver.hpp`.
-`live_replay` runs until interrupted (Ctrl-C / `SIGINT`) since a live feed has
-no natural end.
+Real ITCH is distributed over UDP multicast wrapped in NASDAQ's MoldUDP64
+session protocol, and this is a real (if scoped) implementation of it, not a
+raw-framing stand-in: every packet on the data channel carries a MoldUDP64
+session header (10-byte session id + 8-byte sequence number + 2-byte message
+count), `live_replay`'s `MoldUdp64Receiver` detects sequence gaps, and closes
+them with a retransmission request/reply round trip on a separate request
+channel that `multicast_sender`'s `MoldUdp64Sender` honors by replaying the
+missed sequence range — see `include/net/moldudp64.hpp` and
+`include/net/multicast_receiver.hpp` for the wire format and session-layer
+implementation, and `tests/test_moldudp64.cpp` for gap-detection/gap-fill
+tests against a simulated lossy sender.
+
+Documented simplifications versus the full spec: one message per packet
+rather than batching several into a message-count > 1 packet (the batched
+case is decoded fine — `moldudp64.hpp`'s header format doesn't hardcode
+count=1 — `MoldUdp64Sender` just never emits it); a bounded number of
+gap-fill request/reply round trips before giving up on a given gap, with no
+snapshot/refresh fallback after that point; and `multicast_sender`, being a
+one-shot demo process rather than a persistent session server, only serves
+retransmission requests for a few seconds after sending before it exits.
+`live_replay` runs until interrupted (Ctrl-C / `SIGINT`) or a MoldUDP64
+end-of-session packet, since a live feed otherwise has no natural end.
 
 ## License
 

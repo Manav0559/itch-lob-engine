@@ -43,10 +43,10 @@ add_executable(replay_threaded src/replay_threaded_main.cpp)
 target_link_libraries(replay_threaded PRIVATE itch ZLIB::ZLIB Threads::Threads)
 target_compile_options(replay_threaded PRIVATE ${PROJECT_WARNINGS})
 
-# Toy UDP multicast feed handler + companion synthetic sender — a scoped
-# proof-of-concept of the delivery MECHANISM real ITCH feeds use (see
-# include/net/multicast_receiver.hpp for the explicit MoldUDP64 scope note),
-# not a network protocol implementation.
+# UDP multicast feed handler + companion synthetic sender, running a real
+# MoldUDP64 session (session header, sequence numbers, gap detection,
+# retransmission-request gap-fill) — see
+# include/net/multicast_receiver.hpp for the session-layer implementation.
 add_executable(live_replay src/live_replay_main.cpp)
 target_link_libraries(live_replay PRIVATE itch)
 target_compile_options(live_replay PRIVATE ${PROJECT_WARNINGS})
@@ -93,6 +93,7 @@ add_executable(unit_tests
   tests/test_spsc_queue.cpp
   tests/test_replay_threaded.cpp
   tests/test_multicast_receiver.cpp
+  tests/test_moldudp64.cpp
   tests/test_risk_gate.cpp
   tests/test_thread_affinity.cpp
 )

@@ -13,15 +13,16 @@
 
 #include "book/order_book.hpp"
 #include "itch/parser.hpp"
+#include "net/moldudp64.hpp"
 #include "net/multicast_receiver.hpp"
 
-// SCOPE: joins a UDP multicast group and decodes the same 2-byte-length-
-// prefix framing replay_main.cpp reads from files, one frame per datagram —
-// see include/net/multicast_receiver.hpp and
-// include/net/multicast_test_sender.hpp for why this is a proof-of-concept
-// of the delivery mechanism, not a MoldUDP64 implementation, and why it
-// assumes no packet loss (fine on loopback against multicast_sender_main,
-// not representative of a real exchange feed).
+// Joins a UDP multicast group and decodes a real NASDAQ MoldUDP64 session:
+// session header + sequence numbers on the data channel, sequence-gap
+// detection, and a retransmission-request round trip on a separate request
+// channel when a gap is found — see include/net/multicast_receiver.hpp
+// (MoldUdp64Receiver) for the session-layer implementation and its
+// documented simplifications versus the full spec. Pair with
+// multicast_sender_main.cpp, which honors those retransmission requests.
 namespace {
 
 // Same shape as replay_main.cpp's BookBuilder, kept as a separate local copy
@@ -64,7 +65,7 @@ struct BookBuilder {
     void on_other(char type, std::size_t) { bump(type); }
 };
 
-void report(const BookBuilder& h, std::uint64_t frames) {
+void report(const BookBuilder& h, std::uint64_t frames, const net::MoldUdp64Receiver& recv) {
     std::size_t open_orders = 0, bid_levels = 0, ask_levels = 0;
     for (const auto& [locate, b] : h.books) {
         open_orders += b.open_orders();
@@ -78,6 +79,10 @@ void report(const BookBuilder& h, std::uint64_t frames) {
                 bid_levels, ask_levels);
     std::printf("unknown refs     %llu\n",
                 static_cast<unsigned long long>(h.unknown_refs));
+    std::printf("moldudp64 seq    next=%llu pending=%zu gap-fill requests=%llu%s\n",
+                static_cast<unsigned long long>(recv.next_seq()), recv.pending_count(),
+                static_cast<unsigned long long>(recv.gap_fill_requests_sent()),
+                recv.session_ended() ? " (session ended)" : "");
     std::printf("frames by type   ");
     for (int t = 0; t < 256; ++t)
         if (h.counts[static_cast<std::size_t>(t)] > 0)
@@ -88,7 +93,8 @@ void report(const BookBuilder& h, std::uint64_t frames) {
 
 // Set by the SIGINT handler; polled once per recv() timeout. A live
 // multicast feed has no end-of-file the way a replayed file does, so Ctrl-C
-// is the only way this binary ever stops. The poll loop relies on a recv()
+// is the only way this binary ever stops (short of the sender emitting a
+// MoldUDP64 end-of-session packet). The poll loop relies on a recv()
 // timeout rather than EINTR from the signal itself: whether a blocking
 // syscall interrupted by a signal returns EINTR or is transparently
 // restarted is platform-dependent (macOS's libc signal() restarts by
@@ -97,36 +103,33 @@ void report(const BookBuilder& h, std::uint64_t frames) {
 volatile std::sig_atomic_t g_stop = 0;
 void on_sigint(int) { g_stop = 1; }
 
-int run(const std::string& group, std::uint16_t port, std::uint64_t report_every) {
+// Must match the session id multicast_sender_main.cpp sends — MoldUdp64Receiver
+// silently ignores packets from any other session (see its constructor comment).
+constexpr std::string_view kSessionId = "ITCHDEMO01";
+
+int run(const std::string& group, std::uint16_t data_port, const std::string& request_host,
+        std::uint16_t request_port, std::uint64_t report_every) {
     constexpr auto kPollInterval = std::chrono::milliseconds(200);
-    net::MulticastReceiver recv(group, port, kPollInterval);
-    std::printf("joined %s:%u — press Ctrl-C to stop (a live feed has no natural end)\n",
-                group.c_str(), port);
+    net::MoldUdp64Receiver recv(group, data_port, request_host, request_port,
+                                net::moldudp64::make_session(kSessionId), kPollInterval, kPollInterval);
+    std::printf("joined %s:%u (session '%s', gap-fill requests to %s:%u) — press Ctrl-C to stop\n",
+                group.c_str(), data_port, std::string(kSessionId).c_str(), request_host.c_str(),
+                request_port);
     std::fflush(stdout);
 
     BookBuilder h;
-    std::vector<std::uint8_t> buf(65536);
     std::uint64_t frames = 0;
 
-    while (g_stop == 0) {
-        const ssize_t n = recv.receive(buf.data(), buf.size());
-        if (n < 0) {
-            if (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR)
-                continue;  // recv timeout (expected — lets us re-check g_stop) or interrupted
-            std::fprintf(stderr, "recv error: %s\n", std::strerror(errno));
-            break;
-        }
-        if (n == 0) continue;
-
-        frames += itch::parse_stream(buf.data(), static_cast<std::size_t>(n), h);
+    while (g_stop == 0 && !recv.session_ended()) {
+        frames += recv.poll(h);
         if (report_every > 0 && frames > 0 && frames % report_every == 0) {
-            report(h, frames);
+            report(h, frames, recv);
             std::fflush(stdout);
         }
     }
 
     std::printf("\nstopped\n");
-    report(h, frames);
+    report(h, frames, recv);
     std::fflush(stdout);
     return 0;
 }
@@ -135,17 +138,26 @@ int run(const std::string& group, std::uint16_t port, std::uint64_t report_every
 
 int main(int argc, char** argv) {
     std::string group = "239.255.0.1";
-    std::uint16_t port = 12345;
+    std::uint16_t data_port = 12345;
+    std::uint16_t request_port = 12346;
+    std::string request_host = "127.0.0.1";
     std::uint64_t report_every = 5;  // print a summary every N decoded frames
-    if (argc == 4) {
+    if (argc == 5 || argc == 6) {
         group = argv[1];
-        port = static_cast<std::uint16_t>(std::atoi(argv[2]));
-        report_every = static_cast<std::uint64_t>(std::atoll(argv[3]));
+        data_port = static_cast<std::uint16_t>(std::atoi(argv[2]));
+        request_port = static_cast<std::uint16_t>(std::atoi(argv[3]));
+        report_every = static_cast<std::uint64_t>(std::atoll(argv[4]));
+        if (argc == 6) request_host = argv[5];
     } else if (argc != 1) {
-        std::fprintf(stderr, "usage: %s [group port report_every]\n", argv[0]);
+        std::fprintf(stderr, "usage: %s [group data_port request_port report_every [request_host]]\n",
+                     argv[0]);
         std::fprintf(stderr,
-                     "  joins a multicast group (default 239.255.0.1:12345) and replays\n"
-                     "  decoded ITCH frames into per-symbol books until Ctrl-C.\n"
+                     "  joins a MoldUDP64 multicast group (default 239.255.0.1:12345) and\n"
+                     "  replays decoded ITCH frames into per-symbol books until Ctrl-C or an\n"
+                     "  end-of-session packet. Gap-fill requests go to request_host:request_port\n"
+                     "  (request_port default 12346, request_host default 127.0.0.1, i.e. a\n"
+                     "  sender running on the same host) — must match the request_port\n"
+                     "  multicast_sender_main was given.\n"
                      "  pair with multicast_sender_main to exercise this without a real feed.\n");
         return 2;
     }
@@ -153,7 +165,7 @@ int main(int argc, char** argv) {
     std::signal(SIGINT, on_sigint);
 
     try {
-        return run(group, port, report_every);
+        return run(group, data_port, request_host, request_port, report_every);
     } catch (const std::exception& e) {
         std::fprintf(stderr, "error: %s\n", e.what());
         return 1;
