@@ -84,6 +84,7 @@ add_executable(unit_tests
   tests/test_ladder_book.cpp
   tests/test_exec_twap.cpp
   tests/test_exec_vwap.cpp
+  tests/test_volume_curve.cpp
   tests/test_exec_pov.cpp
   tests/test_exec_almgren_chriss.cpp
   tests/test_io.cpp
