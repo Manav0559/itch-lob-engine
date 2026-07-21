@@ -7,6 +7,8 @@
 #include <string>
 #include <vector>
 
+#include "book/ladder_book.hpp"
+#include "book/order_book.hpp"
 #include "io/gzip_source.hpp"
 #include "io/mmap_source.hpp"
 #include "itch/encode.hpp"
@@ -17,13 +19,14 @@ namespace {
 
 using pipeline::BookBuilder;
 
-void report(const BookBuilder& h, std::size_t bytes, std::size_t frames, double secs) {
+template <typename BookType>
+void report(const BookBuilder<BookType>& h, std::size_t bytes, std::size_t frames, double secs) {
     std::size_t open_orders = 0, bid_levels = 0, ask_levels = 0;
-    for (const auto& [locate, b] : h.books) {
+    h.books.for_each([&](std::uint16_t, const BookType& b) {
         open_orders += b.open_orders();
         bid_levels += b.bid_levels();
         ask_levels += b.ask_levels();
-    }
+    });
 
     std::printf("bytes            %zu\n", bytes);
     std::printf("frames           %zu\n", frames);
@@ -31,7 +34,7 @@ void report(const BookBuilder& h, std::size_t bytes, std::size_t frames, double 
     if (secs > 0.0)
         std::printf("throughput       %.0f frames/s (single run, no warmup — see bench target)\n",
                     static_cast<double>(frames) / secs);
-    std::printf("books            %zu\n", h.books.size());
+    std::printf("books            %zu\n", h.books.book_count());
     std::printf("open orders      %zu (bid levels %zu, ask levels %zu)\n",
                 open_orders, bid_levels, ask_levels);
     std::printf("unknown refs     %llu\n",
@@ -44,8 +47,9 @@ void report(const BookBuilder& h, std::size_t bytes, std::size_t frames, double 
     std::printf("\n");
 }
 
+template <typename BookType>
 int run(const std::uint8_t* data, std::size_t len) {
-    BookBuilder h;
+    BookBuilder<BookType> h;
     const auto t0 = std::chrono::steady_clock::now();
     const std::size_t frames = itch::parse_stream(data, len, h);
     const auto t1 = std::chrono::steady_clock::now();
@@ -56,9 +60,10 @@ int run(const std::uint8_t* data, std::size_t len) {
 // Maps the whole file read-only instead of copying it into a heap buffer —
 // the path for multi-GB day files, where an ifstream-into-vector read would
 // double the resident memory and pay for a copy the parser doesn't need.
+template <typename BookType>
 int run_mmap(const std::string& path) {
     io::MmapSource src(path);
-    BookBuilder h;
+    BookBuilder<BookType> h;
     const auto t0 = std::chrono::steady_clock::now();
     const std::size_t frames = itch::parse_stream(src.data(), src.size(), h);
     const auto t1 = std::chrono::steady_clock::now();
@@ -68,9 +73,10 @@ int run_mmap(const std::string& path) {
 
 // Decompresses .gz day files chunk by chunk instead of inflating the whole
 // day into memory first.
+template <typename BookType>
 int run_gzip(const std::string& path) {
     io::GzipSource src(path);
-    BookBuilder h;
+    BookBuilder<BookType> h;
     const auto t0 = std::chrono::steady_clock::now();
     const std::size_t frames = src.run(h);
     const auto t1 = std::chrono::steady_clock::now();
@@ -81,6 +87,7 @@ int run_gzip(const std::string& path) {
 // The original whole-file-into-memory path, kept as an explicit fallback
 // (--legacy) rather than removed: useful for A/B checking the mmap/gzip
 // paths against a known-simple baseline on small files.
+template <typename BookType>
 int run_legacy(const std::string& path) {
     std::ifstream f(path, std::ios::binary | std::ios::ate);
     if (!f) {
@@ -94,12 +101,13 @@ int run_legacy(const std::string& path) {
         std::fprintf(stderr, "error: short read on %s\n", path.c_str());
         return 1;
     }
-    return run(buf.data(), buf.size());
+    return run<BookType>(buf.data(), buf.size());
 }
 
 // A tiny in-memory session so the binary demonstrates the full pipeline
 // without a data file: two symbols, adds through replaces, plus one message
 // type we don't decode (must be skipped, never desynchronize).
+template <typename BookType>
 int selftest() {
     using namespace itch::encode;
     Msg system_event;  // 'S' (12 bytes) — a real type the book ignores
@@ -117,20 +125,25 @@ int selftest() {
         replace(2, 160, 3001, 3002, 800, 4'199'500),  // MSFT bid moves down
         del(1, 170, 1002),                            // AAPL book now ask-only
     });
-    return run(buf.data(), buf.size());
+    return run<BookType>(buf.data(), buf.size());
 }
 
-}  // namespace
-
-int main(int argc, char** argv) {
-    if (argc == 2 && std::strcmp(argv[1], "--selftest") == 0) return selftest();
-    if (argc == 3 && std::strcmp(argv[1], "--legacy") == 0) return run_legacy(argv[2]);
+// Every entry point above is templated on BookType so main() can pick which
+// book backs the whole run via one flag, rather than duplicating each
+// function body per book type.
+template <typename BookType>
+int dispatch_args(int argc, char** argv) {
+    if (argc == 2 && std::strcmp(argv[1], "--selftest") == 0) return selftest<BookType>();
+    if (argc == 3 && std::strcmp(argv[1], "--legacy") == 0) return run_legacy<BookType>(argv[2]);
     if (argc != 2) {
         std::fprintf(stderr,
-                     "usage: %s <file>           mmap (or gz-stream, if the name ends in .gz)\n"
+                     "usage: %s [--map] <file>   mmap (or gz-stream, if the name ends in .gz)\n"
                      "                            and replay a NASDAQ ITCH 5.0 file\n"
-                     "       %s --legacy <file>   read the whole file into memory first, then replay\n"
-                     "       %s --selftest        replay a built-in synthetic session\n",
+                     "       %s [--map] --legacy <file>   read the whole file into memory first, then replay\n"
+                     "       %s [--map] --selftest        replay a built-in synthetic session\n"
+                     "       --map forces the std::map-based OrderBook instead of the default\n"
+                     "               LadderBook (see README's benchmark table) — an explicit A/B\n"
+                     "               option, not a recommended default.\n",
                      argv[0], argv[0], argv[0]);
         return 2;
     }
@@ -138,9 +151,31 @@ int main(int argc, char** argv) {
     const std::string path = argv[1];
     const bool is_gz = path.size() >= 3 && path.compare(path.size() - 3, 3, ".gz") == 0;
     try {
-        return is_gz ? run_gzip(path) : run_mmap(path);
+        return is_gz ? run_gzip<BookType>(path) : run_mmap<BookType>(path);
     } catch (const std::exception& e) {
         std::fprintf(stderr, "error: %s\n", e.what());
         return 1;
     }
+}
+
+// Strips `flag` out of argv in place (shifting later args down) and reports
+// whether it was present, so the rest of main()'s argc-based parsing below
+// doesn't need to know --map can appear anywhere on the command line.
+bool consume_flag(int& argc, char** argv, const char* flag) {
+    for (int i = 1; i < argc; ++i) {
+        if (std::strcmp(argv[i], flag) == 0) {
+            for (int j = i; j < argc - 1; ++j) argv[j] = argv[j + 1];
+            --argc;
+            return true;
+        }
+    }
+    return false;
+}
+
+}  // namespace
+
+int main(int argc, char** argv) {
+    const bool use_map = consume_flag(argc, argv, "--map");
+    return use_map ? dispatch_args<book::OrderBook>(argc, argv)
+                   : dispatch_args<book::LadderBook>(argc, argv);
 }

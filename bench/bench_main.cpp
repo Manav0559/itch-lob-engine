@@ -12,7 +12,6 @@
 #include <fstream>
 #include <optional>
 #include <string>
-#include <unordered_map>
 #include <vector>
 
 #include "synthetic_session.hpp"
@@ -21,50 +20,18 @@
 #include "io/gzip_source.hpp"
 #include "io/mmap_source.hpp"
 #include "itch/parser.hpp"
+#include "pipeline/dispatch_to_book.hpp"
 
 namespace {
 
-// ---------------------------------------------------------------------
-// Per-book-type storage: OrderBook is default-constructible, LadderBook
-// is not (it needs a price window up front), so lazy construction needs a
-// hint price. Synthetic replay always has one (the symbol's known mid
-// price); real-file replay falls back to the first add's own price, or a
-// generic default if a locate is somehow seen without one first.
-// ---------------------------------------------------------------------
-
-template <typename BookType>
-class BookStore;
-
-template <>
-class BookStore<book::OrderBook> {
-public:
-    book::OrderBook& get(std::uint16_t locate, std::uint32_t /*price_hint*/) {
-        return books_[locate];
-    }
-    std::size_t book_count() const { return books_.size(); }
-
-private:
-    std::unordered_map<std::uint16_t, book::OrderBook> books_;
-};
-
-template <>
-class BookStore<book::LadderBook> {
-public:
-    book::LadderBook& get(std::uint16_t locate, std::uint32_t price_hint) {
-        auto it = books_.find(locate);
-        if (it == books_.end()) {
-            const std::uint32_t base = price_hint != 0 ? price_hint : kFallbackBase;
-            it = books_.emplace(locate, book::LadderBook(base, bench::kTickSize, kWindowPct)).first;
-        }
-        return it->second;
-    }
-    std::size_t book_count() const { return books_.size(); }
-
-private:
-    static constexpr std::uint32_t kFallbackBase = 500'000;  // $50.00, unseen-locate fallback
-    static constexpr double kWindowPct = 0.30;
-    std::unordered_map<std::uint16_t, book::LadderBook> books_;
-};
+// Per-book-type storage is now pipeline::BookTable (include/pipeline/
+// book_table.hpp) — the same dense, locate-indexed table
+// pipeline::BookBuilder uses in production. This used to be a local
+// BookStore<T> duplicated here; promoting it to shared code means this
+// benchmark measures the actual production storage mechanism, not a
+// stand-in that could drift from it. The LadderBook construction hint
+// (fallback base price, tick size, window) lives in one place now too:
+// pipeline::BookTraits<book::LadderBook> (dispatch_to_book.hpp).
 
 using LatBuckets = std::array<std::vector<std::uint64_t>, 256>;
 
@@ -80,7 +47,7 @@ void merge_into(LatBuckets& dst, const LatBuckets& src) {
 // timed window, same for every message type and both book variants.
 template <typename BookType>
 struct BenchHandler {
-    BookStore<BookType>& store;
+    pipeline::BookTable<BookType>& store;
     LatBuckets& lat;
     std::uint64_t unknown_refs = 0;
 
@@ -91,7 +58,7 @@ struct BenchHandler {
     }
 
     void on_add(const itch::AddOrder& m) {
-        BookType& b = store.get(m.hdr.locate, m.price);
+        BookType& b = store.get_or_create(m.hdr.locate, m.price);
         const auto t0 = std::chrono::steady_clock::now();
         const bool ok = b.add(m.ref, m.side, m.shares, m.price);
         const auto t1 = std::chrono::steady_clock::now();
@@ -99,7 +66,7 @@ struct BenchHandler {
         if (!ok) ++unknown_refs;
     }
     void on_execute(const itch::OrderExecuted& m) {
-        BookType& b = store.get(m.hdr.locate, 0);
+        BookType& b = store.get_or_create(m.hdr.locate, 0);
         const auto t0 = std::chrono::steady_clock::now();
         const bool ok = b.execute(m.ref, m.shares);
         const auto t1 = std::chrono::steady_clock::now();
@@ -107,7 +74,7 @@ struct BenchHandler {
         if (!ok) ++unknown_refs;
     }
     void on_execute_price(const itch::OrderExecutedPrice& m) {
-        BookType& b = store.get(m.hdr.locate, 0);
+        BookType& b = store.get_or_create(m.hdr.locate, 0);
         const auto t0 = std::chrono::steady_clock::now();
         const bool ok = b.execute(m.ref, m.shares);
         const auto t1 = std::chrono::steady_clock::now();
@@ -115,7 +82,7 @@ struct BenchHandler {
         if (!ok) ++unknown_refs;
     }
     void on_cancel(const itch::OrderCancel& m) {
-        BookType& b = store.get(m.hdr.locate, 0);
+        BookType& b = store.get_or_create(m.hdr.locate, 0);
         const auto t0 = std::chrono::steady_clock::now();
         const bool ok = b.cancel(m.ref, m.canceled);
         const auto t1 = std::chrono::steady_clock::now();
@@ -123,7 +90,7 @@ struct BenchHandler {
         if (!ok) ++unknown_refs;
     }
     void on_delete(const itch::OrderDelete& m) {
-        BookType& b = store.get(m.hdr.locate, 0);
+        BookType& b = store.get_or_create(m.hdr.locate, 0);
         const auto t0 = std::chrono::steady_clock::now();
         const bool ok = b.remove(m.ref);
         const auto t1 = std::chrono::steady_clock::now();
@@ -131,7 +98,7 @@ struct BenchHandler {
         if (!ok) ++unknown_refs;
     }
     void on_replace(const itch::OrderReplace& m) {
-        BookType& b = store.get(m.hdr.locate, m.price);
+        BookType& b = store.get_or_create(m.hdr.locate, m.price);
         const auto t0 = std::chrono::steady_clock::now();
         const bool ok = b.replace(m.orig_ref, m.new_ref, m.shares, m.price);
         const auto t1 = std::chrono::steady_clock::now();
@@ -153,7 +120,7 @@ struct PassResult {
 // cheap early-return path, not the mutation this harness measures.
 template <typename BookType>
 PassResult<BookType> run_pass(const std::uint8_t* data, std::size_t len) {
-    BookStore<BookType> store;
+    pipeline::BookTable<BookType> store;
     PassResult<BookType> result;
     BenchHandler<BookType> h{store, result.lat};
     itch::parse_stream(data, len, h);
@@ -172,7 +139,7 @@ PassResult<BookType> run_pass(const std::uint8_t* data, std::size_t len) {
 // regardless of file size, same as replay_main's --gz path.
 template <typename BookType>
 PassResult<BookType> run_pass_gz(const std::string& path) {
-    BookStore<BookType> store;
+    pipeline::BookTable<BookType> store;
     PassResult<BookType> result;
     BenchHandler<BookType> h{store, result.lat};
     io::GzipSource src(path);

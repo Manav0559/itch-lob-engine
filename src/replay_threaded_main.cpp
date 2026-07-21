@@ -7,6 +7,8 @@
 #include <string>
 #include <vector>
 
+#include "book/ladder_book.hpp"
+#include "book/order_book.hpp"
 #include "io/gzip_source.hpp"
 #include "io/mmap_source.hpp"
 #include "itch/encode.hpp"
@@ -31,14 +33,15 @@ using pipeline::RunStats;
 // mean something (a queue that's *always* full just measures its own size).
 constexpr std::size_t kQueueCapacity = 1u << 16;
 
-void report(const BookBuilder& h, std::size_t bytes, std::size_t frames, double secs,
+template <typename BookType>
+void report(const BookBuilder<BookType>& h, std::size_t bytes, std::size_t frames, double secs,
             std::size_t max_occupancy) {
     std::size_t open_orders = 0, bid_levels = 0, ask_levels = 0;
-    for (const auto& [locate, b] : h.books) {
+    h.books.for_each([&](std::uint16_t, const BookType& b) {
         open_orders += b.open_orders();
         bid_levels += b.bid_levels();
         ask_levels += b.ask_levels();
-    }
+    });
 
     std::printf("bytes            %zu\n", bytes);
     std::printf("frames           %zu\n", frames);
@@ -46,7 +49,7 @@ void report(const BookBuilder& h, std::size_t bytes, std::size_t frames, double 
     if (secs > 0.0)
         std::printf("throughput       %.0f frames/s (single run, no warmup — see bench target)\n",
                     static_cast<double>(frames) / secs);
-    std::printf("books            %zu\n", h.books.size());
+    std::printf("books            %zu\n", h.books.book_count());
     std::printf("open orders      %zu (bid levels %zu, ask levels %zu)\n",
                 open_orders, bid_levels, ask_levels);
     std::printf("unknown refs     %llu\n",
@@ -62,9 +65,10 @@ void report(const BookBuilder& h, std::size_t bytes, std::size_t frames, double 
                 100.0 * static_cast<double>(max_occupancy) / static_cast<double>(kQueueCapacity));
 }
 
+template <typename BookType>
 int run(const std::uint8_t* data, std::size_t len) {
     const auto t0 = std::chrono::steady_clock::now();
-    RunStats stats = pipeline::run_pipeline<kQueueCapacity>(
+    RunStats<BookType> stats = pipeline::run_pipeline<kQueueCapacity, BookType>(
         [&](QueueProducer<kQueueCapacity>& p) { itch::parse_stream(data, len, p); });
     const auto t1 = std::chrono::steady_clock::now();
     report(stats.builder, len, stats.frames, std::chrono::duration<double>(t1 - t0).count(),
@@ -72,22 +76,25 @@ int run(const std::uint8_t* data, std::size_t len) {
     return 0;
 }
 
+template <typename BookType>
 int run_mmap(const std::string& path) {
     io::MmapSource src(path);
     const auto t0 = std::chrono::steady_clock::now();
-    RunStats stats = pipeline::run_pipeline<kQueueCapacity>([&](QueueProducer<kQueueCapacity>& p) {
-        itch::parse_stream(src.data(), src.size(), p);
-    });
+    RunStats<BookType> stats = pipeline::run_pipeline<kQueueCapacity, BookType>(
+        [&](QueueProducer<kQueueCapacity>& p) {
+            itch::parse_stream(src.data(), src.size(), p);
+        });
     const auto t1 = std::chrono::steady_clock::now();
     report(stats.builder, src.size(), stats.frames,
            std::chrono::duration<double>(t1 - t0).count(), stats.max_occupancy);
     return 0;
 }
 
+template <typename BookType>
 int run_gzip(const std::string& path) {
     io::GzipSource src(path);
     const auto t0 = std::chrono::steady_clock::now();
-    RunStats stats = pipeline::run_pipeline<kQueueCapacity>(
+    RunStats<BookType> stats = pipeline::run_pipeline<kQueueCapacity, BookType>(
         [&](QueueProducer<kQueueCapacity>& p) { src.run(p); });
     const auto t1 = std::chrono::steady_clock::now();
     report(stats.builder, src.bytes_decompressed(), stats.frames,
@@ -95,6 +102,7 @@ int run_gzip(const std::string& path) {
     return 0;
 }
 
+template <typename BookType>
 int run_legacy(const std::string& path) {
     std::ifstream f(path, std::ios::binary | std::ios::ate);
     if (!f) {
@@ -108,11 +116,12 @@ int run_legacy(const std::string& path) {
         std::fprintf(stderr, "error: short read on %s\n", path.c_str());
         return 1;
     }
-    return run(buf.data(), buf.size());
+    return run<BookType>(buf.data(), buf.size());
 }
 
 // Same synthetic session as replay_main.cpp's selftest(), so the two
 // binaries are directly comparable on identical input.
+template <typename BookType>
 int selftest() {
     using namespace itch::encode;
     Msg system_event;
@@ -130,21 +139,22 @@ int selftest() {
         replace(2, 160, 3001, 3002, 800, 4'199'500),  // MSFT bid moves down
         del(1, 170, 1002),                            // AAPL book now ask-only
     });
-    return run(buf.data(), buf.size());
+    return run<BookType>(buf.data(), buf.size());
 }
 
-}  // namespace
-
-int main(int argc, char** argv) {
-    if (argc == 2 && std::strcmp(argv[1], "--selftest") == 0) return selftest();
-    if (argc == 3 && std::strcmp(argv[1], "--legacy") == 0) return run_legacy(argv[2]);
+template <typename BookType>
+int dispatch_args(int argc, char** argv) {
+    if (argc == 2 && std::strcmp(argv[1], "--selftest") == 0) return selftest<BookType>();
+    if (argc == 3 && std::strcmp(argv[1], "--legacy") == 0) return run_legacy<BookType>(argv[2]);
     if (argc != 2) {
         std::fprintf(stderr,
-                     "usage: %s <file>           mmap (or gz-stream, if the name ends in .gz)\n"
+                     "usage: %s [--map] <file>   mmap (or gz-stream, if the name ends in .gz)\n"
                      "                            and replay a NASDAQ ITCH 5.0 file through the\n"
                      "                            parser-thread/book-builder-thread pipeline\n"
-                     "       %s --legacy <file>   read the whole file into memory first, then replay\n"
-                     "       %s --selftest        replay a built-in synthetic session\n",
+                     "       %s [--map] --legacy <file>   read the whole file into memory first, then replay\n"
+                     "       %s [--map] --selftest        replay a built-in synthetic session\n"
+                     "       --map forces the std::map-based OrderBook instead of the default\n"
+                     "               LadderBook — an explicit A/B option, not a recommended default.\n",
                      argv[0], argv[0], argv[0]);
         return 2;
     }
@@ -152,9 +162,28 @@ int main(int argc, char** argv) {
     const std::string path = argv[1];
     const bool is_gz = path.size() >= 3 && path.compare(path.size() - 3, 3, ".gz") == 0;
     try {
-        return is_gz ? run_gzip(path) : run_mmap(path);
+        return is_gz ? run_gzip<BookType>(path) : run_mmap<BookType>(path);
     } catch (const std::exception& e) {
         std::fprintf(stderr, "error: %s\n", e.what());
         return 1;
     }
+}
+
+bool consume_flag(int& argc, char** argv, const char* flag) {
+    for (int i = 1; i < argc; ++i) {
+        if (std::strcmp(argv[i], flag) == 0) {
+            for (int j = i; j < argc - 1; ++j) argv[j] = argv[j + 1];
+            --argc;
+            return true;
+        }
+    }
+    return false;
+}
+
+}  // namespace
+
+int main(int argc, char** argv) {
+    const bool use_map = consume_flag(argc, argv, "--map");
+    return use_map ? dispatch_args<book::OrderBook>(argc, argv)
+                   : dispatch_args<book::LadderBook>(argc, argv);
 }

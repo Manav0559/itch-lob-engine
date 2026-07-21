@@ -4,6 +4,7 @@
 #include <thread>
 #include <utility>
 
+#include "book/ladder_book.hpp"
 #include "pipeline/dispatch_to_book.hpp"
 #include "pipeline/message.hpp"
 #include "pipeline/spsc_queue.hpp"
@@ -63,8 +64,9 @@ struct QueueProducer {
     void on_other(char type, std::size_t) { push_spin(Envelope{.type = type, .add = {}}); }
 };
 
+template <typename BookType>
 struct ConsumerResult {
-    BookBuilder builder;
+    BookBuilder<BookType> builder;
     std::size_t frames = 0;
 };
 
@@ -73,8 +75,8 @@ struct ConsumerResult {
 // it's observed true the queue is drained completely before exiting — the
 // producer can't push anything more after setting it, so a full drain at
 // that point is guaranteed to be the true end of the stream.
-template <typename Queue>
-void consume(Queue& queue, const std::atomic<bool>& producer_done, ConsumerResult& result) {
+template <typename Queue, typename BookType>
+void consume(Queue& queue, const std::atomic<bool>& producer_done, ConsumerResult<BookType>& result) {
     Envelope env;
     while (true) {
         if (queue.pop(env)) {
@@ -93,8 +95,9 @@ void consume(Queue& queue, const std::atomic<bool>& producer_done, ConsumerResul
     }
 }
 
+template <typename BookType>
 struct RunStats {
-    BookBuilder builder;
+    BookBuilder<BookType> builder;
     std::size_t frames = 0;
     std::size_t max_occupancy = 0;
 };
@@ -106,17 +109,23 @@ struct RunStats {
 // here after both threads have joined, so no additional synchronization is
 // needed beyond the join()s and the producer_done flag consume() already
 // uses to know when to stop.
-template <std::size_t QueueCapacity, typename Decode>
-RunStats run_pipeline(Decode&& decode) {
+//
+// BookType defaults to book::LadderBook (see dispatch_to_book.hpp's
+// BookBuilder) so existing call sites (`run_pipeline<kQueueCapacity>(...)`)
+// get the faster book automatically; pass it explicitly
+// (`run_pipeline<kQueueCapacity, book::OrderBook>(...)`) to A/B against the
+// std::map baseline instead.
+template <std::size_t QueueCapacity, typename BookType = book::LadderBook, typename Decode>
+RunStats<BookType> run_pipeline(Decode&& decode) {
     using Queue = SpscQueue<Envelope, QueueCapacity>;
 
     Queue queue;
     std::atomic<bool> producer_done{false};
     QueueProducer<QueueCapacity> producer{queue};
-    ConsumerResult consumer_result;
+    ConsumerResult<BookType> consumer_result;
 
-    std::thread book_builder_thread(consume<Queue>, std::ref(queue), std::cref(producer_done),
-                                     std::ref(consumer_result));
+    std::thread book_builder_thread(consume<Queue, BookType>, std::ref(queue),
+                                     std::cref(producer_done), std::ref(consumer_result));
     std::thread parser_thread([&] {
         decode(producer);
         producer_done.store(true, std::memory_order_release);
@@ -125,8 +134,8 @@ RunStats run_pipeline(Decode&& decode) {
     parser_thread.join();
     book_builder_thread.join();
 
-    return RunStats{std::move(consumer_result.builder), consumer_result.frames,
-                     producer.max_occupancy};
+    return RunStats<BookType>{std::move(consumer_result.builder), consumer_result.frames,
+                               producer.max_occupancy};
 }
 
 }  // namespace pipeline

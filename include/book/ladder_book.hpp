@@ -17,6 +17,14 @@ namespace book {
 // price outside that range the same way it rejects a duplicate ref (false
 // return, no partial state), rather than growing the ladder to fit.
 //
+// tick_size_ is a real constraint, not just a memory-vs-range knob: prices
+// must land exactly on the (min_price_, min_price_ + tick_size_, ...) grid,
+// or two distinct prices could floor-divide into the same array slot and
+// silently merge two real price levels into one. add() rejects a
+// non-grid-aligned price the same way it rejects an out-of-range one — see
+// pipeline::BookTraits<LadderBook> (dispatch_to_book.hpp) for the tick_size
+// production actually constructs this with against real ITCH data.
+//
 // The window defaults to +/-20% around the caller-supplied reference price,
 // which comfortably covers a normal trading day for one name. A name that
 // gaps or halts past that band needs a wider window_pct passed explicitly —
@@ -31,11 +39,21 @@ class LadderBook {
 public:
     explicit LadderBook(std::uint32_t base_price, std::uint32_t tick_size = 1,
                          double window_pct = 0.20)
-        : LadderBook(tick_size == 0 ? 1 : tick_size, window_low(base_price, window_pct),
+        : LadderBook(tick_size == 0 ? 1 : tick_size,
+                     snap_to_tick(window_low(base_price, window_pct), tick_size == 0 ? 1 : tick_size),
                      window_high(base_price, window_pct)) {}
 
     bool add(std::uint64_t ref, itch::Side side, std::uint32_t shares, std::uint32_t price) {
-        if (!in_range(price)) return false;  // outside the fixed ladder window
+        // Rejected the same way an out-of-range price is: false, no partial
+        // state. idx() below is integer division by tick_size_ — a price
+        // that isn't grid-aligned to min_price_ would floor-divide into
+        // whatever slot is nearest, silently colliding with a real adjacent
+        // price level instead of getting its own. That's harmless for a
+        // benchmark seeded with grid-aligned synthetic prices (this ladder's
+        // original use), but a real ITCH feed can carry sub-penny prices
+        // (Reg NMS Rule 612 permits them under $1), so this check matters
+        // now that LadderBook is wired into production against real files.
+        if (!in_range(price) || (price - min_price_) % tick_size_ != 0) return false;
         const auto [it, inserted] = orders_.try_emplace(ref, Order{shares, price, side});
         if (!inserted) return false;  // duplicate ref: never double-count a level
         const std::size_t i = idx(price);
@@ -107,6 +125,18 @@ private:
           num_ticks_(static_cast<std::size_t>(max_price_ - min_price_) / tick_size_ + 1),
           bids_(num_ticks_),
           asks_(num_ticks_) {}
+
+    // window_low's own arithmetic (a float multiply then truncate) gives no
+    // guarantee the result lands on the tick grid, even when base_price and
+    // tick_size both do — snapping down here, once, at construction, is what
+    // makes every later grid-aligned real price satisfy add()'s
+    // (price - min_price_) % tick_size_ == 0 check. Anchoring the grid to an
+    // absolute tick_size_ multiple (not to base_price specifically) is also
+    // why two different LadderBooks with the same tick_size_ agree on where
+    // the grid lines fall, even with different base prices.
+    static std::uint32_t snap_to_tick(std::uint32_t price, std::uint32_t tick_size) {
+        return (price / tick_size) * tick_size;
+    }
 
     static std::uint32_t window_low(std::uint32_t base_price, double window_pct) {
         const std::uint32_t window = static_cast<std::uint32_t>(base_price * window_pct);

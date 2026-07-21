@@ -41,6 +41,16 @@ cmake --build build --target bench && ./build/bench && python3 bench/plot.py
 - [x] `LadderBook` vs. `OrderBook` benchmarked head-to-head: `./build/bench`,
       p50/p99/p99.9 per message type, committed CSV + plots (see table below
       and [bench/](bench/))
+- [x] **`LadderBook` is the production default**, not just a benchmark
+      exhibit: `replay`/`replay_threaded` route every message through a
+      dense, locate-indexed `pipeline::BookTable` (`include/pipeline/
+      book_table.hpp`) backed by `LadderBook` by default — pass `--map` to
+      force the `std::map`-based `OrderBook` instead, for an explicit A/B.
+      Wiring this up surfaced (and fixed) a real bug: `LadderBook`'s tick-grid
+      alignment wasn't anchored consistently, which would have silently
+      merged distinct real price levels once fed actual exchange data instead
+      of grid-perfect synthetic prices — see
+      [docs/devlog-orderbook-vs-ladderbook.md](docs/devlog-orderbook-vs-ladderbook.md).
 - [x] Full-day invariant suite: a synthetic trading day replayed through
       `OrderBook`, `LadderBook`, and an independent from-scratch reference
       model, cross-checked against each other at every 250-message checkpoint
@@ -52,14 +62,22 @@ cmake --build build --target bench && ./build/bench && python3 bench/plot.py
 - [x] Multi-threaded pipeline (`replay_threaded`): parsing and book-building
       decoupled onto separate threads joined by a lock-free SPSC queue
       (`include/pipeline/spsc_queue.hpp`), instead of one thread doing both —
-      produces identical book state to `replay`, and reports max queue
-      occupancy as a backpressure indicator. **Measured, not assumed, and it
-      does not help here**: `./build/bench_threaded` shows throughput within
-      noise of single-threaded (0.75–1.03x across runs) and a real latency
-      regression under load — see
-      [bench/THREADED_PIPELINE_FINDINGS.md](bench/THREADED_PIPELINE_FINDINGS.md)
-      for why (book-mutation cost dominates parsing cost, leaving little for
-      the queue handoff to hide behind)
+      produces identical book state to `replay` (now checked against both
+      `OrderBook` and `LadderBook` — `tests/test_replay_threaded.cpp`), and
+      reports max queue occupancy as a backpressure indicator.
+      **Original finding** (measured against `OrderBook`, before `LadderBook`
+      became the default): throughput within noise of single-threaded
+      (0.75–1.03x across runs) and a real latency regression under load — see
+      [bench/THREADED_PIPELINE_FINDINGS.md](bench/THREADED_PIPELINE_FINDINGS.md).
+      **Open question, not yet resolved**: now that `LadderBook` (much
+      cheaper per-message book mutation) is what both paths default to, a
+      fresh `./build/bench_threaded` run showed the threaded pipeline
+      *ahead* of single-threaded (~1.03–1.2x depending on pass) — the
+      opposite of the original verdict. That single noisy run (this machine
+      runs benchmarks alongside real background load) is not enough to
+      overturn a documented conclusion; it needs the same rigor the original
+      finding got (multiple runs, ideally with CPU core pinning — see the
+      roadmap) before `THREADED_PIPELINE_FINDINGS.md` gets rewritten.
 - [x] Live UDP multicast feed handler (`live_replay` + `multicast_sender`): a
       scoped proof-of-concept of how real ITCH is actually delivered
       (multicast, not files) — deliberately not a MoldUDP64 implementation;
@@ -82,7 +100,8 @@ cmake --build build --target bench && ./build/bench && python3 bench/plot.py
       (requires an explicit `reset()` — no automatic self-healing) between a
       strategy's `ChildOrder` output and wherever orders go next
 - [x] Coverage-guided fuzzing of the ITCH parser (`fuzz/`): libFuzzer +
-      ASan/UBSan against `itch::parse_stream` through a real `OrderBook`, not
+      ASan/UBSan against `itch::parse_stream` through a real `BookBuilder`
+      (`LadderBook`-backed, the same default production now uses), not
       just decode-in-isolation — 4.6M+ executions across seed runs, clean, no
       crashes found so far; see [fuzz/README.md](fuzz/README.md)
 
@@ -106,18 +125,24 @@ cmake --build build --target bench && ./build/bench && python3 bench/plot.py
 
   | type | OrderBook p50 | LadderBook p50 | OrderBook p99.9 | LadderBook p99.9 |
   |------|--------------:|---------------:|----------------:|-----------------:|
-  | A    | 84 ns         | 42 ns          | 1,208 ns        | 625 ns           |
-  | E    | 167 ns        | 125 ns         | 1,042 ns        | 792 ns           |
-  | C    | 167 ns        | 125 ns         | 1,000 ns        | 750 ns           |
-  | X    | 167 ns        | 125 ns         | 1,000 ns        | 750 ns           |
-  | D    | 209 ns        | 167 ns         | 1,916 ns        | 1,208 ns         |
-  | U    | 333 ns        | 250 ns         | 2,666 ns        | 1,459 ns         |
+  | A    | 166 ns        | 42 ns          | 10,709 ns       | 4,125 ns         |
+  | E    | 334 ns        | 208 ns         | 13,166 ns       | 7,625 ns         |
+  | C    | 334 ns        | 208 ns         | 13,500 ns       | 7,666 ns         |
+  | X    | 334 ns        | 208 ns         | 13,792 ns       | 7,167 ns         |
+  | D    | 417 ns        | 292 ns         | 15,667 ns       | 10,375 ns        |
+  | U    | 542 ns        | 375 ns         | 22,458 ns       | 12,042 ns        |
 
   Full distributions and plots: [bench/results.csv](bench/results.csv),
   [bench/plots/](bench/plots/). `std::map`'s tail is dominated by
   red-black-tree rebalancing on insert/erase; `LadderBook` pays a fixed
   array-index cost regardless of how full the book is, at the cost of a
   bounded price window fixed at construction (see `include/book/ladder_book.hpp`).
+  Regenerated after `LadderBook` became the production default (see the
+  `pipeline::BookTable`/`BookBuilder` entry above) — absolute numbers move
+  run to run with this machine's background load (the project's own
+  single-run-no-warmup caveat, and why `bench/check_budget.py`'s CI gate is a
+  same-run ratio check, not an absolute one), but the ratio between the two
+  books is the reproducible, load-bearing part of this table.
 
 ## Build & test
 

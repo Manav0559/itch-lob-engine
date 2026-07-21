@@ -17,7 +17,9 @@
 #include "pipeline/dispatch_to_book.hpp"
 
 extern "C" int LLVMFuzzerTestOneInput(const std::uint8_t* data, std::size_t size) {
-    pipeline::BookBuilder h;
+    // Defaults to book::LadderBook, same as production replay/replay_threaded
+    // now do — this harness fuzzes the path real files actually take.
+    pipeline::BookBuilder<> h;
     itch::parse_stream(data, size, h);
     return 0;
 }

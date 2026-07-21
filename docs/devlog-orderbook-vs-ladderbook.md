@@ -95,3 +95,40 @@ spike well past a steady-state average. Whether the tail gap between
 burst is an open question until this same harness runs against a real
 NASDAQ ITCH day file, which `./build/bench /path/to/day.NASDAQ_ITCH50` already
 supports.
+
+## From benchmark exhibit to production default
+
+For a while, this measurement was true but not *acted on*: `replay` and
+`replay_threaded` — the binaries that would actually process a real exchange
+file — hardcoded `OrderBook` regardless of what the benchmark above proved.
+Proving a component is faster and then never routing real traffic through it
+is its own kind of bug, just not one a compiler or test suite catches.
+
+Fixing that meant more than swapping a type alias. `OrderBook` is
+default-constructible; `LadderBook` needs a price window at construction,
+which the production pipeline only learns from the first `'A'` it sees for a
+given locate. `bench/bench_main.cpp` had already solved that (a small
+`BookStore<T>` with a `BookTraits`-style hook for the price hint) — so
+promoting that pattern into shared code
+(`include/pipeline/book_table.hpp`'s `BookTable`, `BookTraits<LadderBook>` in
+`include/pipeline/dispatch_to_book.hpp`) is what let `pipeline::BookBuilder`
+become generic over book type, with `LadderBook` as the default and `--map`
+as an explicit escape hatch back to `OrderBook`.
+
+That exercise surfaced a real bug, not a hypothetical one: `LadderBook`'s
+`idx(price) = (price - min_price_) / tick_size_` requires every stored price
+to land exactly on a grid anchored at `min_price_` — but `min_price_` itself
+(derived from a float multiply-then-truncate in `window_low()`) was never
+snapped to that grid. Every price the *synthetic* benchmark generates is
+already tick-aligned in absolute terms, so this never showed up in
+`bench/results.csv`. The moment `LadderBook` went into the real pipeline,
+`unknown_refs` on a full 2.2M-message run jumped from 0 to 6.6 million —
+almost every add was landing off-grid relative to an unaligned origin and
+getting rejected outright, which also made the "latency" numbers look
+suspiciously uniform and fast (rejections are cheap; that's not the mutation
+cost anyone wanted measured). The fix was one line —
+`snap_to_tick(window_low(...), tick_size)` — but finding it required actually
+running the new wiring against realistic data and noticing the numbers
+didn't smell right, not just getting a clean compile. `unknown_refs` returned
+to 0 immediately after, and the full test suite (94 cases, including the
+three-way full-day invariant check) stayed green throughout.

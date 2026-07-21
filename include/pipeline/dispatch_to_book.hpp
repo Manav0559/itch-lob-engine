@@ -2,17 +2,51 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
-#include <unordered_map>
 
+#include "book/ladder_book.hpp"
 #include "book/order_book.hpp"
 #include "itch/messages.hpp"
+#include "pipeline/book_table.hpp"
 #include "pipeline/message.hpp"
 
 namespace pipeline {
 
-// Routes decoded events into one OrderBook per stock locate and keeps
-// per-type counts. Unknown order refs are counted, not fatal: on a partial
-// replay (or a corrupt file) they tell you how out-of-sync the book is.
+// book::LadderBook needs a price window at construction, so it can't be
+// default-constructed the way book::OrderBook can — this specializes how
+// BookTable builds a LadderBook on first sight of a locate: the 'A' that
+// introduces a new symbol carries that symbol's first known price, which
+// becomes the ladder's center. kTickSize=100 and kWindowPct=0.30 are not
+// arbitrary: they're exactly what bench/bench_main.cpp's BookStore<LadderBook>
+// (now superseded by this shared table) actually measured LadderBook's
+// advantage under (see README's benchmark table). kTickSize=100 is a real
+// one-cent US-equity minimum tick in ITCH's 1/10000-dollar price units — using
+// tick_size=1 here instead would silently allocate a ladder ~100x larger than
+// the one the benchmark numbers describe, for the same price window. The
+// production default and the benchmarked configuration must be the same
+// configuration, not two that happen to share a class name.
+template <>
+struct BookTraits<book::LadderBook> {
+    static constexpr std::uint32_t kFallbackBase = 500'000;  // $50.00: unseen-locate fallback
+    static constexpr std::uint32_t kTickSize = 100;          // $0.01, in ITCH's 1/10000-dollar units
+    static constexpr double kWindowPct = 0.30;
+    static book::LadderBook make(std::uint32_t price_hint) {
+        return book::LadderBook(price_hint != 0 ? price_hint : kFallbackBase, kTickSize, kWindowPct);
+    }
+};
+
+// Routes decoded events into one book per stock locate — via a dense,
+// locate-indexed BookTable rather than a hash map (see
+// pipeline/book_table.hpp for why) — and keeps per-type counts. Unknown
+// order refs are counted, not fatal: on a partial replay (or a corrupt file)
+// they tell you how out-of-sync the book is.
+//
+// BookType defaults to book::LadderBook: the flat tick-ladder book measured
+// faster than book::OrderBook (std::map ladders) across every message type,
+// with the gap widening sharply in the tail (see README's benchmark table
+// and docs/devlog-orderbook-vs-ladderbook.md). Pass BookType=book::OrderBook
+// explicitly (replay/replay_threaded's --map flag) to run the slower,
+// unbounded-price-range baseline instead — kept as an explicit A/B option,
+// the same way --legacy keeps the whole-file-into-memory I/O path around.
 //
 // Shared by both replay binaries: replay_main.cpp drives it straight from
 // itch::dispatch on raw bytes (single-threaded), replay_threaded_main.cpp
@@ -21,8 +55,9 @@ namespace pipeline {
 // bottoms out in these same on_* methods — there is exactly one
 // implementation of "decode this message into this book," not one per
 // binary.
+template <typename BookType = book::LadderBook>
 struct BookBuilder {
-    std::unordered_map<std::uint16_t, book::OrderBook> books;
+    BookTable<BookType> books;
     std::array<std::uint64_t, 256> counts{};
     std::uint64_t unknown_refs = 0;
 
@@ -30,27 +65,29 @@ struct BookBuilder {
 
     void on_add(const itch::AddOrder& m) {
         bump('A');
-        if (!books[m.hdr.locate].add(m.ref, m.side, m.shares, m.price)) ++unknown_refs;
+        if (!books.get_or_create(m.hdr.locate, m.price).add(m.ref, m.side, m.shares, m.price))
+            ++unknown_refs;
     }
     void on_execute(const itch::OrderExecuted& m) {
         bump('E');
-        if (!books[m.hdr.locate].execute(m.ref, m.shares)) ++unknown_refs;
+        if (!books.get_or_create(m.hdr.locate, 0).execute(m.ref, m.shares)) ++unknown_refs;
     }
     void on_execute_price(const itch::OrderExecutedPrice& m) {
         bump('C');
-        if (!books[m.hdr.locate].execute(m.ref, m.shares)) ++unknown_refs;
+        if (!books.get_or_create(m.hdr.locate, 0).execute(m.ref, m.shares)) ++unknown_refs;
     }
     void on_cancel(const itch::OrderCancel& m) {
         bump('X');
-        if (!books[m.hdr.locate].cancel(m.ref, m.canceled)) ++unknown_refs;
+        if (!books.get_or_create(m.hdr.locate, 0).cancel(m.ref, m.canceled)) ++unknown_refs;
     }
     void on_delete(const itch::OrderDelete& m) {
         bump('D');
-        if (!books[m.hdr.locate].remove(m.ref)) ++unknown_refs;
+        if (!books.get_or_create(m.hdr.locate, 0).remove(m.ref)) ++unknown_refs;
     }
     void on_replace(const itch::OrderReplace& m) {
         bump('U');
-        if (!books[m.hdr.locate].replace(m.orig_ref, m.new_ref, m.shares, m.price))
+        if (!books.get_or_create(m.hdr.locate, m.price)
+                 .replace(m.orig_ref, m.new_ref, m.shares, m.price))
             ++unknown_refs;
     }
     void on_other(char type, std::size_t) { bump(type); }
@@ -62,7 +99,8 @@ struct BookBuilder {
 // BookBuilder::on_* calls, so the "apply this message to the book" logic
 // itself is never duplicated, only its entry point (raw bytes vs. an
 // already-decoded envelope crossing a thread boundary).
-inline void dispatch_to_book(const Envelope& env, BookBuilder& h) {
+template <typename BookType>
+inline void dispatch_to_book(const Envelope& env, BookBuilder<BookType>& h) {
     switch (env.type) {
         case 'A':
         case 'F':

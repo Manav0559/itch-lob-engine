@@ -1,9 +1,11 @@
+#include <catch2/catch_template_test_macros.hpp>
 #include <catch2/catch_test_macros.hpp>
 #include <atomic>
 #include <cstdint>
 #include <thread>
 #include <vector>
 
+#include "book/ladder_book.hpp"
 #include "book/order_book.hpp"
 #include "itch/encode.hpp"
 #include "itch/parser.hpp"
@@ -18,9 +20,14 @@
 // (shared via pipeline/dispatch_to_book.hpp), so this is really a check that
 // the threading/queue plumbing routes every message through exactly once,
 // in order, per stock locate.
+//
+// Run against both book::OrderBook and book::LadderBook (TEMPLATE_TEST_CASE)
+// rather than just the one book type production happens to default to right
+// now — the threading/queue plumbing being tested here doesn't know or care
+// which book it's routing into, so there's no reason this check should only
+// ever have exercised one of them.
 namespace {
 
-using pipeline::BookBuilder;
 using pipeline::Envelope;
 
 // Same synthetic session as replay_main.cpp / replay_threaded_main.cpp's
@@ -84,11 +91,12 @@ struct TestProducer {
 // Replays `data` through a real parser thread + book-builder thread joined
 // by TestQueue, mirroring replay_threaded_main.cpp's run_pipeline/consume
 // shape at test scale.
-BookBuilder replay_threaded(const std::uint8_t* data, std::size_t len) {
+template <typename BookType>
+pipeline::BookBuilder<BookType> replay_threaded(const std::uint8_t* data, std::size_t len) {
     TestQueue queue;
     std::atomic<bool> producer_done{false};
     TestProducer producer{queue};
-    BookBuilder builder;
+    pipeline::BookBuilder<BookType> builder;
 
     std::thread book_builder_thread([&] {
         Envelope env;
@@ -114,13 +122,15 @@ BookBuilder replay_threaded(const std::uint8_t* data, std::size_t len) {
     return builder;
 }
 
-void check_same_book_state(const BookBuilder& single, const BookBuilder& threaded) {
-    REQUIRE(single.books.size() == threaded.books.size());
-    for (const auto& [locate, single_book] : single.books) {
+template <typename BookType>
+void check_same_book_state(const pipeline::BookBuilder<BookType>& single,
+                           const pipeline::BookBuilder<BookType>& threaded) {
+    REQUIRE(single.books.book_count() == threaded.books.book_count());
+    single.books.for_each([&](std::uint16_t locate, const BookType& single_book) {
         INFO("locate " << locate);
-        const auto it = threaded.books.find(locate);
-        REQUIRE(it != threaded.books.end());
-        const book::OrderBook& threaded_book = it->second;
+        const BookType* threaded_book_ptr = threaded.books.find(locate);
+        REQUIRE(threaded_book_ptr != nullptr);
+        const BookType& threaded_book = *threaded_book_ptr;
 
         CHECK(single_book.open_orders() == threaded_book.open_orders());
         CHECK(single_book.bid_levels() == threaded_book.bid_levels());
@@ -135,29 +145,31 @@ void check_same_book_state(const BookBuilder& single, const BookBuilder& threade
             CHECK(single_book.best_ask()->price == threaded_book.best_ask()->price);
             CHECK(single_book.best_ask()->shares == threaded_book.best_ask()->shares);
         }
-    }
+    });
 }
 
 }  // namespace
 
-TEST_CASE("threaded pipeline produces identical book state to the single-threaded path") {
+TEMPLATE_TEST_CASE("threaded pipeline produces identical book state to the single-threaded path",
+                   "[book]", book::OrderBook, book::LadderBook) {
     const std::vector<std::uint8_t> buf = synthetic_session();
 
-    BookBuilder single;
+    pipeline::BookBuilder<TestType> single;
     REQUIRE(itch::parse_stream(buf.data(), buf.size(), single) == 9);
 
-    const BookBuilder threaded = replay_threaded(buf.data(), buf.size());
+    const pipeline::BookBuilder<TestType> threaded = replay_threaded<TestType>(buf.data(), buf.size());
 
     check_same_book_state(single, threaded);
     CHECK(single.unknown_refs == threaded.unknown_refs);
 }
 
-TEST_CASE("threaded pipeline preserves per-type frame counts") {
+TEMPLATE_TEST_CASE("threaded pipeline preserves per-type frame counts", "[book]", book::OrderBook,
+                   book::LadderBook) {
     const std::vector<std::uint8_t> buf = synthetic_session();
 
-    BookBuilder single;
+    pipeline::BookBuilder<TestType> single;
     itch::parse_stream(buf.data(), buf.size(), single);
-    const BookBuilder threaded = replay_threaded(buf.data(), buf.size());
+    const pipeline::BookBuilder<TestType> threaded = replay_threaded<TestType>(buf.data(), buf.size());
 
     for (int t = 0; t < 256; ++t) CHECK(single.counts[static_cast<std::size_t>(t)] ==
                                         threaded.counts[static_cast<std::size_t>(t)]);

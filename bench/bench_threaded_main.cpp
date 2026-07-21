@@ -50,7 +50,7 @@ struct PassTiming {
 // Mirrors replay_main.cpp's run(): itch::parse_stream feeding a BookBuilder
 // directly, one thread doing both parsing and book mutation inline.
 PassTiming run_single_threaded_pass(const std::uint8_t* data, std::size_t len) {
-    pipeline::BookBuilder h;
+    pipeline::BookBuilder<> h;  // defaults to book::LadderBook, same as run_threaded_pass below
     const auto t0 = std::chrono::steady_clock::now();
     const std::size_t frames = itch::parse_stream(data, len, h);
     const auto t1 = std::chrono::steady_clock::now();
@@ -63,7 +63,7 @@ PassTiming run_single_threaded_pass(const std::uint8_t* data, std::size_t len) {
 // is part of what "decoupling costs" means for a wall-clock comparison.
 PassTiming run_threaded_pass(const std::uint8_t* data, std::size_t len) {
     const auto t0 = std::chrono::steady_clock::now();
-    pipeline::RunStats stats = pipeline::run_pipeline<kQueueCapacity>(
+    auto stats = pipeline::run_pipeline<kQueueCapacity>(
         [&](pipeline::QueueProducer<kQueueCapacity>& p) { itch::parse_stream(data, len, p); });
     const auto t1 = std::chrono::steady_clock::now();
     return {stats.frames, std::chrono::duration<double>(t1 - t0).count()};
