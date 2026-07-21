@@ -1,5 +1,9 @@
 # itch-lob-engine
 
+[![CI](https://github.com/Manav0559/itch-lob-engine/actions/workflows/ci.yml/badge.svg)](https://github.com/Manav0559/itch-lob-engine/actions/workflows/ci.yml)
+[![C++20](https://img.shields.io/badge/C%2B%2B-20-blue.svg)](https://en.cppreference.com/w/cpp/20)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+
 A NASDAQ TotalView-ITCH 5.0 order-book reconstruction engine in C++20.
 
 Parses the real exchange binary protocol (length-prefixed `BinaryFILE`
@@ -132,8 +136,14 @@ cmake --build build --target bench && ./build/bench && python3 bench/plot.py
   | D    | 417 ns        | 292 ns         | 15,667 ns       | 10,375 ns        |
   | U    | 542 ns        | 375 ns         | 22,458 ns       | 12,042 ns        |
 
+  ![p50 latency, OrderBook vs LadderBook](bench/plots/p50_ns.png)
+  ![p99 latency, OrderBook vs LadderBook](bench/plots/p99_ns.png)
+  ![p99.9 latency, OrderBook vs LadderBook](bench/plots/p999_ns.png)
+
   Full distributions and plots: [bench/results.csv](bench/results.csv),
-  [bench/plots/](bench/plots/). `std::map`'s tail is dominated by
+  [bench/plots/](bench/plots/) (regenerate with `python3 bench/plot.py`
+  after any `./build/bench` run — requires `pip install matplotlib`).
+  `std::map`'s tail is dominated by
   red-black-tree rebalancing on insert/erase; `LadderBook` pays a fixed
   array-index cost regardless of how full the book is, at the cost of a
   bounded price window fixed at construction (see `include/book/ladder_book.hpp`).
