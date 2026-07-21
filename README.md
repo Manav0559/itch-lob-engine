@@ -33,10 +33,15 @@ cmake --build build --target bench && ./build/bench && python3 bench/plot.py
 - [x] Unit tests (Catch2) incl. the classic footguns: phantom empty levels,
       duplicate refs, over-executes on feed gaps, truncated tails
 - [x] CI on Linux + macOS, `-Wall -Wextra -Wpedantic -Werror`
-- [x] Execution strategies: Twap (time-sliced), Vwap (elapsed-time-weighted,
-      tape-reactive), Pov (percentage-of-volume) — header-only, allocation-free,
-      no floating point, share the same compile-time-dispatched
-      `ExecutionStrategy` interface
+- [x] Execution strategies: Twap (time-sliced), Vwap (tape-reactive,
+      scheduled against a fixed-bucket historical intraday volume-curve model
+      — the classic U-shape, heavy at the open/close, light mid-day — instead
+      of a flat elapsed-time ramp; see `include/exec/volume_curve.hpp`), Pov
+      (percentage-of-volume) — header-only, allocation-free, share the same
+      compile-time-dispatched `ExecutionStrategy` interface. No floating
+      point on the per-message hot path anywhere in the three; Vwap's one
+      genuine use of it (turning the curve's hand-authored weights into an
+      integer lookup table) is confined to construction, not the hot path.
 - [x] `mmap` input path for large uncompressed day files; gzip-streaming input
       path (chunked `inflate`, carries partial frames across chunk boundaries)
       for compressed day files
