@@ -63,12 +63,14 @@ than warned on — there's nothing to compare against yet.
   measurement.
 - `bench/ci_history.csv` — committed, append-only. Columns:
   `timestamp_utc,commit_sha,os,book_type,message_type,p50_ns,p99_ns,p999_ns`.
-  Starts as a header-only file; real rows accumulate as CI merges to `main`
-  run `check_budget.py record`. The `os` column holds GitHub Actions'
-  `RUNNER_OS` value (`Linux` / `macOS`) when run in CI, or
-  `platform.system()`'s output (e.g. `Darwin`) when run locally — local
-  runs are for testing the script, not for seeding real CI history, since
-  the OS labels won't match.
+  Starts as a header-only file; real rows accumulate automatically — every
+  push to `main` that clears the budget check runs `check_budget.py record`
+  and the CI job commits the result straight back to `main` with the default
+  `GITHUB_TOKEN` (see `bench/CI_INTEGRATION.md` for the exact workflow steps).
+  The `os` column holds GitHub Actions' `RUNNER_OS` value (`Linux` /
+  `macOS`) when run in CI, or `platform.system()`'s output (e.g. `Darwin`)
+  when run locally — local runs are for testing the script, not for seeding
+  real CI history, since the OS labels won't match.
 
 ## Usage
 
@@ -76,8 +78,10 @@ than warned on — there's nothing to compare against yet.
 # Hard gate + soft warning, against the results.csv just written by ./build/bench:
 python3 bench/check_budget.py check
 
-# Append this run's numbers to the rolling history (only meaningful for a
-# blessed run, e.g. after a merge to main — see bench/CI_INTEGRATION.md):
+# Append this run's numbers to the rolling history (CI already does this
+# automatically on every push to main that clears the budget check — see
+# bench/CI_INTEGRATION.md; run it by hand only for local testing or to
+# backfill a run CI didn't record):
 python3 bench/check_budget.py record
 
 # Useful flags:
