@@ -1,14 +1,17 @@
 #pragma once
 #include <cassert>
+#include <cstddef>
 
 #include "exec/execution_strategy.hpp"
 #include "exec/types.hpp"
+#include "exec/volume_curve.hpp"
 
 namespace exec {
 
 // Parent order for a volume-weighted execution. Same field shape as
 // TwapParams (see exec/twap.hpp) for consistency, minus the bin_ns slicing
-// parameter — Vwap has no schedule to pre-compute, it reacts to the tape.
+// parameter — Vwap has no clock-driven schedule to pre-compute, it reacts
+// to the tape against a historical volume curve instead (see below).
 struct VwapParams {
     itch::Side side = itch::Side::Buy;
     Shares total_shares = 0;
@@ -19,13 +22,25 @@ struct VwapParams {
 };
 
 // Volume-weighted average price, driven by the tape rather than a clock.
-// This engine has no historical volume curve to participate against, so the
-// participation target is elapsed-time-weighted instead:
+// The participation target is read off a fixed historical intraday
+// volume-curve model (exec::VolumeCurve, see exec/volume_curve.hpp) — the
+// classic U-shape, heavy at the open and close, lighter mid-day — rather
+// than a flat elapsed-time ramp:
 //
-//   target_shares(now) = total_shares * (now - start_ts) / (end_ts - start_ts)
+//   target_shares(now) = total_shares * curve_fraction(now)
 //
-// Every trade tick inside [start_ts, end_ts] is an opportunity to catch up to
-// that target: on each tick, Vwap sends max(0, target_shares(now) -
+// where curve_fraction(now) is the cumulative share of the curve's volume
+// that [start_ts, now] is expected to have printed, linearly interpolated
+// within whichever of the curve's kVolumeCurveBuckets buckets `now` falls
+// in (the same "volume is uniform within a slice" assumption Twap makes
+// globally, just applied to one curve bucket instead of the whole
+// session). The curve is a *relative* shape stretched across whatever
+// [start_ts, end_ts) window is given — it is not a wall-clock
+// trading-hours table, so a 10-minute window gets the same U-shaped
+// front/back-loading a full session would, just compressed.
+//
+// Every trade tick inside [start_ts, end_ts] is an opportunity to catch up
+// to that target: on each tick, Vwap sends max(0, target_shares(now) -
 // shares_sent), clamped so cumulative sent never exceeds total_shares. A
 // tick outside the window is a no-op — before start_ts there is nothing to
 // catch up to, after end_ts the schedule has already run out.
@@ -35,9 +50,16 @@ struct VwapParams {
 // Vwap satisfies the same ExecutionStrategy interface as Twap and Pov and
 // all three can share one dispatch loop.
 //
-// All arithmetic is integer: target_shares(now) multiplies total_shares (up
-// to 2^32-1) by an elapsed-time delta that can itself span most of a
-// trading day in nanoseconds, so the product is computed in UInt128 (see
+// The per-message hot path (target_shares(), called from
+// on_trade_tick_impl on every print) is entirely integer arithmetic — it
+// only ever touches VolumeCurve's precomputed integer cumulative_ table,
+// never a float. The one place this design genuinely needs floating point
+// — turning the curve's hand-authored relative weights into that integer
+// table — is confined to VolumeCurve's constructor, which runs once per
+// Vwap construction, not per message; see exec/volume_curve.hpp for that
+// code and rationale. target_shares() itself multiplies total_shares (up
+// to 2^32-1) by curve/time quantities that can each span most of a trading
+// day in nanoseconds, so those products are computed in UInt128 (see
 // exec/types.hpp) before dividing back down to Shares — a plain
 // std::uint64_t product overflows well within realistic inputs.
 class Vwap : public ExecutionStrategy<Vwap> {
@@ -53,8 +75,9 @@ public:
     Shares shares_sent() const { return shares_sent_; }
 
     // Cumulative shares traded on the tape since start_ts, across all sides —
-    // bookkeeping for observability, not an input to target_shares() (this
-    // engine has no historical curve to weight it against).
+    // bookkeeping for observability, not an input to target_shares() (the
+    // schedule is weighted against the fixed VolumeCurve model, not
+    // against volume actually observed on this tape).
     Shares market_shares_seen() const { return market_shares_seen_; }
 
     const ChildOrderQueue& child_orders() const { return queue_; }
@@ -83,20 +106,62 @@ public:
     }
 
 private:
-    // target_shares(now) = total_shares * (now - start_ts) / (end_ts -
-    // start_ts), widened to UInt128 (see exec/types.hpp) for the multiply so
-    // a large total_shares times a large elapsed-time delta cannot wrap a
-    // 64-bit accumulator before the division brings it back into Shares range.
+    // Which curve bucket `now` falls in, plus how far into that bucket it
+    // is (as a remainder over `span`, so the caller never needs a separate
+    // "bucket width" quantity that might not divide span evenly). Mirrors
+    // Twap's bin math, just against kVolumeCurveBuckets instead of a
+    // caller-supplied bin_ns.
+    struct BucketPosition {
+        std::size_t index;
+        Timestamp remainder;  // out of `span`, i.e. fraction == remainder / span
+    };
+
+    static BucketPosition bucket_position(Timestamp elapsed, Timestamp span) {
+        if (elapsed >= span) {
+            return BucketPosition{kVolumeCurveBuckets - 1, span};
+        }
+        // Multiplying elapsed by kVolumeCurveBuckets before dividing by
+        // span (not the other way around) keeps this exact for the same
+        // reason the old elapsed-time math widened first — see
+        // exec/types.hpp's UInt128 comment.
+        const UInt128 scaled = static_cast<UInt128>(elapsed) * kVolumeCurveBuckets;
+        std::size_t index = static_cast<std::size_t>(scaled / span);
+        if (index >= kVolumeCurveBuckets) index = kVolumeCurveBuckets - 1;
+        const Timestamp remainder = static_cast<Timestamp>(scaled % span);
+        return BucketPosition{index, remainder};
+    }
+
+    // target_shares(now) = total_shares * curve_fraction(now), where
+    // curve_fraction(now) is VolumeCurve's cumulative weight through the
+    // end of the previous bucket, plus a linear-interpolation slice of the
+    // current bucket's weight for how far `now` is into it. Every step is
+    // integer, widened to UInt128 (see exec/types.hpp) before any divide,
+    // so a large total_shares times a large curve/time quantity cannot
+    // wrap a 64-bit accumulator before the division brings it back into
+    // range.
     Shares target_shares(Timestamp now) const {
         const Timestamp elapsed = now - params_.start_ts;
         const Timestamp span = params_.end_ts - params_.start_ts;
-        const UInt128 target = static_cast<UInt128>(params_.total_shares) * elapsed / span;
+        const BucketPosition pos = bucket_position(elapsed, span);
+
+        const std::uint64_t cum_before =
+            pos.index == 0 ? 0 : curve_.cumulative_weight(pos.index - 1);
+        const std::uint64_t cum_after = curve_.cumulative_weight(pos.index);
+        const std::uint64_t bucket_weight = cum_after - cum_before;
+
+        const UInt128 within_bucket =
+            static_cast<UInt128>(bucket_weight) * pos.remainder / span;
+        const UInt128 curve_fraction = static_cast<UInt128>(cum_before) + within_bucket;
+
+        const UInt128 target =
+            static_cast<UInt128>(params_.total_shares) * curve_fraction / kCurveScale;
         return target >= params_.total_shares
                    ? params_.total_shares
                    : static_cast<Shares>(target);
     }
 
     VwapParams params_;
+    VolumeCurve curve_;
     Shares shares_sent_ = 0;
     Shares market_shares_seen_ = 0;
     ChildOrderQueue queue_;
