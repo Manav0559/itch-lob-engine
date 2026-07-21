@@ -11,9 +11,18 @@
 #include "book/order_book.hpp"
 #include "itch/encode.hpp"
 #include "itch/parser.hpp"
+#include "net/moldudp64.hpp"
 #include "net/multicast_receiver.hpp"
 #include "net/multicast_test_sender.hpp"
 
+// Loopback, no-loss baseline for the real MoldUDP64 session layer
+// (net::MoldUdp64Sender / net::MoldUdp64Receiver, see
+// include/net/multicast_receiver.hpp) — a full session delivered without any
+// dropped packets should decode into the exact same book state the file-
+// replay path produces, with zero gap-fill requests along the way.
+// tests/test_moldudp64.cpp covers the gap-detection/gap-fill path itself
+// (simulated packet loss); this file stays focused on "the happy path
+// through the real session framing still works end to end."
 namespace {
 
 // The same synthetic session --selftest / multicast_sender_main send: two
@@ -58,31 +67,28 @@ struct Recorder {
 
 }  // namespace
 
-TEST_CASE("multicast_receiver receives a synthetic session byte-for-byte and "
-          "rebuilds the known-good book",
+TEST_CASE("MoldUdp64 session receives a synthetic session with no loss and "
+          "rebuilds the known-good book, issuing zero gap-fill requests",
           "[concurrency]") {
     const std::string group = "239.255.0.1";
-    // A port distinct from the demo binaries' default (12345), so this test
-    // never collides with someone manually running multicast_sender_main /
-    // live_replay_main against each other while the suite is running.
-    const std::uint16_t port = 12399;
+    // A port distinct from the demo binaries' defaults (12345/12346), so
+    // this test never collides with someone manually running
+    // multicast_sender_main / live_replay_main while the suite is running.
+    const std::uint16_t data_port = 12399;
+    const std::uint16_t request_port = 12398;
+    const auto session = net::moldudp64::make_session("TESTSESS01");
 
     const std::vector<std::uint8_t> framed = synthetic_session();
 
-    // Join before sending: the multicast group membership must be in place
-    // (IGMP join propagated) before any datagram is sent, or the first
-    // frame(s) are silently dropped rather than received.
-    //
     // Some sandboxed CI network stacks (observed on a GitHub-hosted
     // macos-latest runner) don't cleanly REJECT IP multicast — join and send
     // both report success — they just never deliver the packets: the socket
     // API succeeds, the datagram vanishes into whatever virtual network
     // filtering sits underneath. A construction/send failure is guarded
-    // below the same as before, but that alone doesn't cover this case: a
-    // receive() with no timeout (the default) would then block forever
-    // waiting for data that is never coming, hanging the whole test binary
-    // until CI's own job-level timeout kills it. A per-call receive timeout
-    // plus a bounded overall deadline turns that hang into a clean SKIP.
+    // below the same as before, but that alone doesn't cover this case: an
+    // unbounded wait would then hang the whole test binary until CI's own
+    // job-level timeout kills it. A per-call receive timeout plus a bounded
+    // overall deadline turns that hang into a clean SKIP.
     constexpr auto kRecvTimeout = std::chrono::milliseconds(200);
     constexpr auto kOverallDeadline = std::chrono::seconds(5);
 
@@ -96,9 +102,10 @@ TEST_CASE("multicast_receiver receives a synthetic session byte-for-byte and "
     // opposite of what SKIP() is for. SUCCEED() sidesteps that ambiguity
     // entirely: it registers one real, passing assertion, so there is
     // nothing left for that safety net to fire on.
-    std::unique_ptr<net::MulticastReceiver> receiver;
+    std::unique_ptr<net::MoldUdp64Receiver> receiver;
     try {
-        receiver = std::make_unique<net::MulticastReceiver>(group, port, kRecvTimeout);
+        receiver = std::make_unique<net::MoldUdp64Receiver>(group, data_port, "127.0.0.1", request_port,
+                                                             session, kRecvTimeout, kRecvTimeout);
     } catch (const std::exception& e) {
         SUCCEED("multicast unavailable in this environment (join failed): " << e.what());
         return;
@@ -106,25 +113,23 @@ TEST_CASE("multicast_receiver receives a synthetic session byte-for-byte and "
     std::this_thread::sleep_for(std::chrono::milliseconds(50));
 
     std::exception_ptr sender_error;
-    std::thread sender([&] {
+    std::thread sender_thread([&] {
         try {
-            net::send_multicast_stream(group, port, framed);
+            net::MoldUdp64Sender sender(group, data_port, request_port, session);
+            sender.load(framed);
+            sender.send_all();
         } catch (...) {
             sender_error = std::current_exception();
         }
     });
 
-    std::vector<std::uint8_t> received;
-    std::vector<std::uint8_t> buf(65536);
+    Recorder r;
+    std::uint64_t frames = 0;
     const auto deadline = std::chrono::steady_clock::now() + kOverallDeadline;
-    while (received.size() < framed.size() && std::chrono::steady_clock::now() < deadline) {
-        const ssize_t n = receiver->receive(buf.data(), buf.size());
-        if (n > 0) received.insert(received.end(), buf.begin(), buf.begin() + n);
-        // n <= 0 here is expected on every timed-out poll (EAGAIN/EWOULDBLOCK)
-        // when nothing arrived within kRecvTimeout — keep polling until the
-        // overall deadline, rather than treating one empty poll as failure.
+    while (!receiver->session_ended() && std::chrono::steady_clock::now() < deadline) {
+        frames += receiver->poll(r);
     }
-    sender.join();
+    sender_thread.join();
 
     if (sender_error) {
         try {
@@ -135,17 +140,18 @@ TEST_CASE("multicast_receiver receives a synthetic session byte-for-byte and "
         }
     }
 
-    if (received.size() < framed.size()) {
-        SUCCEED("multicast unavailable in this environment (no data received within "
+    if (!receiver->session_ended()) {
+        SUCCEED("multicast unavailable in this environment (session never completed within "
                 << kOverallDeadline.count() << "s — join/send reported success but nothing "
                 << "arrived, consistent with a sandboxed CI network silently dropping "
                 << "multicast traffic)");
         return;
     }
-    REQUIRE(received == framed);
 
-    Recorder r;
-    REQUIRE(itch::parse_stream(received.data(), received.size(), r) == 9);  // 1 'S' + 8 order events
+    REQUIRE(frames == 9);  // 1 'S' + 8 order events
+    CHECK(receiver->gap_fill_requests_sent() == 0);
+    CHECK(receiver->pending_count() == 0);
+    CHECK(receiver->next_seq() == 10);  // 9 messages sent, 1-based sequence numbers
     REQUIRE(r.books.size() == 2);
 
     // AAPL (locate 1): the 1001 bid is fully executed and erased, the 1002
