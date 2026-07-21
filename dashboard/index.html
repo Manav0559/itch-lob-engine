@@ -70,8 +70,9 @@
   .wrap { max-width: 1180px; margin: 0 auto; }
 
   header.page { display: flex; justify-content: space-between; align-items: flex-start; gap: 16px; margin-bottom: 6px; flex-wrap: wrap; }
-  h1 { font-size: 22px; margin: 0 0 4px; letter-spacing: -0.01em; }
-  .sub { color: var(--text-secondary); font-size: 13.5px; margin: 0; max-width: 72ch; line-height: 1.5; }
+  h1 { font-size: 22px; margin: 0 0 6px; letter-spacing: -0.01em; }
+  .tagline { color: var(--text-primary); font-size: 14.5px; margin: 0 0 8px; max-width: 72ch; line-height: 1.5; font-weight: 500; }
+  .sub { color: var(--text-secondary); font-size: 13px; margin: 0; max-width: 72ch; line-height: 1.5; }
   code { background: var(--surface-2); border: 1px solid var(--border); border-radius: 4px; padding: 1px 5px; font-size: 0.92em; }
 
   .theme-toggle {
@@ -131,7 +132,7 @@
   .tooltip.show { opacity: 0.96; }
   .tooltip b { font-weight: 700; }
 
-  .axis-tick text, .msg-tick text { fill: var(--text-muted); font-size: 10.5px; }
+  .axis-tick, .msg-tick { fill: var(--text-muted); font-size: 10.5px; }
   .gridline { stroke: var(--grid); stroke-width: 1; }
   .baseline-axis { stroke: var(--baseline); stroke-width: 1; }
   .threshold-line { stroke: var(--critical); stroke-width: 1.5; stroke-dasharray: 4 3; }
@@ -151,6 +152,15 @@
   }
   .empty-state .big { font-size: 26px; margin-bottom: 6px; }
 
+  .loading-state {
+    padding: 28px 20px; text-align: center; color: var(--text-muted); font-size: 12.5px;
+    border: 1px solid var(--border); border-radius: 10px; background: var(--surface-2);
+    animation: pulse 1.3s ease-in-out infinite;
+  }
+  @keyframes pulse { 0%, 100% { opacity: 0.55; } 50% { opacity: 1; } }
+
+  .axis-label { fill: var(--text-muted); font-size: 10.5px; }
+
   footer.page { margin-top: 30px; padding-top: 16px; border-top: 1px solid var(--border); color: var(--text-muted); font-size: 12px; line-height: 1.6; }
   footer.page a { color: inherit; }
 </style>
@@ -161,6 +171,11 @@
   <header class="page">
     <div>
       <h1>itch-lob-engine — bench dashboard</h1>
+      <p class="tagline">
+        A C++20 engine that parses the real NASDAQ TotalView-ITCH 5.0 binary protocol and
+        reconstructs the full limit order book per symbol — this page charts its performance
+        benchmarks (<code>OrderBook</code> vs. <code>LadderBook</code>, single- vs. multi-threaded replay).
+      </p>
       <p class="sub">
         Renders <code>bench/results.csv</code>, <code>bench/results_threaded.csv</code> and
         <code>bench/ci_history.csv</code> directly, client-side, with no build step.
@@ -173,7 +188,9 @@
 
   <div class="banner" id="fetchBanner"></div>
 
-  <div class="stat-row" id="statRow"></div>
+  <div class="stat-row" id="statRow">
+    <div class="loading-state" style="grid-column: 1 / -1;">Loading summary stats…</div>
+  </div>
 
   <section class="panel">
     <h2>OrderBook vs LadderBook — per-message latency</h2>
@@ -183,7 +200,9 @@
       p50 and p99.9 differ by roughly two orders of magnitude, so a shared scale would flatten
       the smaller values to nothing.
     </p>
-    <div class="chart-grid" id="latencyCharts"></div>
+    <div class="chart-grid" id="latencyCharts">
+      <div class="loading-state">Loading bench/results.csv…</div>
+    </div>
     <div class="legend" id="latencyLegend"></div>
   </section>
 
@@ -199,12 +218,12 @@
     <div class="chart-grid two">
       <div class="chart-card">
         <h3>Messages / sec by replay path</h3>
-        <div id="throughputChart"></div>
+        <div id="throughputChart"><div class="loading-state">Loading bench/results_threaded.csv…</div></div>
         <div class="legend" id="throughputLegend"></div>
       </div>
       <div class="chart-card">
         <h3>SPSC queue round-trip latency (ns)</h3>
-        <div id="spscTable"></div>
+        <div id="spscTable"><div class="loading-state">Loading bench/results_threaded.csv…</div></div>
       </div>
     </div>
   </section>
@@ -218,7 +237,7 @@
       threshold of 0.90 from <code>bench/BUDGET.md</code>. Faceted by OS, since Linux and macOS
       runners have different absolute performance profiles.
     </p>
-    <div id="ciSection"></div>
+    <div id="ciSection"><div class="loading-state">Loading bench/ci_history.csv…</div></div>
   </section>
 
   <footer class="page">
@@ -321,7 +340,7 @@
     var categoryLabels = opts.categoryLabels || categories;
     var unit = opts.unit || "";
     var width = opts.width || 340, height = opts.height || 240;
-    var margin = { top: 10, right: 12, bottom: 26, left: 46 };
+    var margin = { top: 20, right: 12, bottom: 26, left: 46 };
     var plotW = width - margin.left - margin.right;
     var plotH = height - margin.top - margin.bottom;
 
@@ -333,6 +352,12 @@
     function y(v) { return margin.top + plotH - (v / axisMax) * plotH; }
 
     var svg = svgEl("svg", { viewBox: "0 0 " + width + " " + height, role: "img" });
+
+    if (unit) {
+      var unitLabel = svgEl("text", { class: "axis-label", x: margin.left, y: margin.top - 8, "text-anchor": "start" });
+      unitLabel.textContent = unit;
+      svg.appendChild(unitLabel);
+    }
 
     // gridlines + y ticks
     ticks.forEach(function (t) {
@@ -415,7 +440,7 @@
   function lineChart(container, opts) {
     var points = opts.points; // [{x label, y}]
     var width = opts.width || 1080, height = opts.height || 220;
-    var margin = { top: 16, right: 16, bottom: 30, left: 46 };
+    var margin = { top: 24, right: 16, bottom: 30, left: 46 };
     var plotW = width - margin.left - margin.right;
     var plotH = height - margin.top - margin.bottom;
 
@@ -430,6 +455,10 @@
     function y(v) { return margin.top + plotH - ((v - minVal) / (maxVal - minVal)) * plotH; }
 
     var svg = svgEl("svg", { viewBox: "0 0 " + width + " " + height });
+
+    var unitLabel = svgEl("text", { class: "axis-label", x: margin.left, y: margin.top - 8, "text-anchor": "start" });
+    unitLabel.textContent = opts.axisLabel || "LadderBook/OrderBook p50 ratio";
+    svg.appendChild(unitLabel);
 
     var ticks = niceTicks(maxVal, 4).filter(function (t) { return t >= minVal; });
     ticks.forEach(function (t) {
@@ -514,6 +543,7 @@
     ];
 
     var chartsContainer = document.getElementById("latencyCharts");
+    chartsContainer.innerHTML = "";
     percentiles.forEach(function (pct) {
       var card = document.createElement("div");
       card.className = "chart-card";
@@ -582,7 +612,7 @@
   }).catch(function (err) {
     document.getElementById("latencyCharts").innerHTML = emptyStateHTML("No latency data", err.message);
     console.error(err);
-  });
+  }).finally(statSourceSettled);
 
   // ============ Section 2: results_threaded.csv ============
   fetchCSV("../bench/results_threaded.csv").then(function (data) {
@@ -608,6 +638,7 @@
       });
 
       var chartDiv = document.getElementById("throughputChart");
+      chartDiv.innerHTML = "";
       groupedBarChart(chartDiv, {
         categories: order.map(function (p) { return pathLabels[p] || p; }),
         series: series,
@@ -637,6 +668,7 @@
     }
 
     var spscDiv = document.getElementById("spscTable");
+    spscDiv.innerHTML = "";
     if (spsc.length > 0) {
       var table = document.createElement("table");
       table.className = "data-table";
@@ -663,7 +695,7 @@
     document.getElementById("throughputChart").innerHTML = emptyStateHTML("Couldn't load throughput data", err.message);
     document.getElementById("spscTable").innerHTML = "";
     console.error(err);
-  });
+  }).finally(statSourceSettled);
 
   // ============ Section 3: ci_history.csv ============
   fetchCSV("../bench/ci_history.csv").then(function (data) {
@@ -696,6 +728,7 @@
       byOs[r.os][sha][r.book_type][r.message_type] = num(r.p50_ns);
     });
 
+    ciSection.innerHTML = "";
     Object.keys(byOs).forEach(function (os) {
       var card = document.createElement("div");
       card.className = "chart-card";
@@ -737,8 +770,20 @@
       '<div style="margin-top:4px;max-width:52ch;margin-left:auto;margin-right:auto;">' + detail + '</div></div>';
   }
 
+  var statSourcesSettled = 0;
+  function statSourceSettled() {
+    statSourcesSettled++;
+    if (statSourcesSettled >= 2) {
+      var row = document.getElementById("statRow");
+      var placeholder = row.querySelector(".loading-state");
+      if (placeholder) placeholder.textContent = "No summary stats available — see the sections below.";
+    }
+  }
+
   function addStatTiles(stats) {
     var row = document.getElementById("statRow");
+    var placeholder = row.querySelector(".loading-state");
+    if (placeholder) placeholder.remove();
     stats.forEach(function (s) {
       var tile = document.createElement("div");
       tile.className = "stat-tile";
