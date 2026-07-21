@@ -29,8 +29,20 @@ struct BookTraits<book::LadderBook> {
     static constexpr std::uint32_t kFallbackBase = 500'000;  // $50.00: unseen-locate fallback
     static constexpr std::uint32_t kTickSize = 100;          // $0.01, in ITCH's 1/10000-dollar units
     static constexpr double kWindowPct = 0.30;
+    // $10,000/share, in ITCH's 1/10000-dollar units — well above any real
+    // US equity, generous headroom for a halted/gapped name. price_hint is
+    // the first 'A' price seen for a locate, read straight off the wire
+    // with no upstream range check (see itch::dispatch) — a corrupt or
+    // adversarial frame near UINT32_MAX would otherwise size this ladder's
+    // window (kWindowPct wider on each side) into a multi-hundred-million-
+    // tick allocation attempt per locate. Falling back to kFallbackBase for
+    // anything outside this bound keeps construction cost bounded and
+    // predictable regardless of what the wire hands us.
+    static constexpr std::uint32_t kMaxSanePrice = 100'000'000;
     static book::LadderBook make(std::uint32_t price_hint) {
-        return book::LadderBook(price_hint != 0 ? price_hint : kFallbackBase, kTickSize, kWindowPct);
+        const std::uint32_t base =
+            (price_hint != 0 && price_hint <= kMaxSanePrice) ? price_hint : kFallbackBase;
+        return book::LadderBook(base, kTickSize, kWindowPct);
     }
 };
 

@@ -1,6 +1,6 @@
 #pragma once
-#include <cassert>
 #include <cstddef>
+#include <stdexcept>
 
 #include "exec/execution_strategy.hpp"
 #include "exec/types.hpp"
@@ -64,11 +64,18 @@ struct VwapParams {
 // std::uint64_t product overflows well within realistic inputs.
 class Vwap : public ExecutionStrategy<Vwap> {
 public:
-    // Precondition: params.start_ts < params.end_ts. Violation is a
-    // construction-time contract failure (asserted), not a runtime state
-    // this class has to keep checking on every tick.
+    // Precondition: params.start_ts < params.end_ts. Violation throws
+    // std::invalid_argument — a construction-time contract failure, not a
+    // runtime state this class has to keep checking on every tick. Not
+    // assert(): NDEBUG (set by every build configuration this project
+    // ships, Release and RelWithDebInfo alike) would compile that check
+    // away entirely — and bucket_position()/target_shares() below divide by
+    // span == end_ts - start_ts, so an unchecked start_ts >= end_ts is a
+    // division-by-zero (or unsigned-underflow-then-huge-divisor) away, not
+    // just a semantically wrong schedule.
     explicit Vwap(const VwapParams& params) : params_(params) {
-        assert(params_.start_ts < params_.end_ts);
+        if (params_.start_ts >= params_.end_ts)
+            throw std::invalid_argument("Vwap: start_ts must be < end_ts");
     }
 
     bool done() const { return shares_sent_ >= params_.total_shares; }

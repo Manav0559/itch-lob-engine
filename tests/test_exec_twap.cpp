@@ -1,5 +1,7 @@
 #include <catch2/catch_test_macros.hpp>
 
+#include <stdexcept>
+
 #include "exec/twap.hpp"
 
 using exec::ChildOrder;
@@ -159,4 +161,21 @@ TEST_CASE("on_bbo_change_impl and on_trade_tick_impl push nothing — Twap is ti
 
     CHECK(t.bin_count() == 5);
     CHECK_FALSE(t.done());
+}
+
+TEST_CASE("constructor throws instead of relying on assert() for invalid params") {
+    // Regression test for a real bug: assert() is compiled to a no-op under
+    // NDEBUG, which every configuration this project builds (Release,
+    // RelWithDebInfo) defines. Before this was fixed, TwapParams's own
+    // default bin_ns=1 against a multi-second span would silently overrun
+    // the fixed-size schedule_ std::array instead of failing loudly here.
+    CHECK_THROWS_AS(Twap(make_params(1000, 500, 0, 100)), std::invalid_argument);  // start >= end
+    CHECK_THROWS_AS(Twap(make_params(1000, 0, 500, 0)), std::invalid_argument);    // bin_ns == 0
+
+    TwapParams huge_span;
+    huge_span.total_shares = 1000;
+    huge_span.start_ts = 0;
+    huge_span.end_ts = 1'000'000'000;  // 1 second, in ns
+    huge_span.bin_ns = 1;              // TwapParams's own default — 1e9 bins, way past kMaxScheduleBins
+    CHECK_THROWS_AS(Twap(huge_span), std::invalid_argument);
 }
