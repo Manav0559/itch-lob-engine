@@ -85,16 +85,17 @@ correct, not just fast.
 
 ## What this doesn't tell you yet
 
-The benchmark has only run against a synthetic session so far, and that's
-worth saying plainly rather than glossing over. The synthetic generator uses
-fixed message-type weights and draws prices from stable per-symbol bands —
-it doesn't reproduce the bursty, clustered order flow real exchanges see
-around the open and close, when message rates and cancel/replace churn both
-spike well past a steady-state average. Whether the tail gap between
-`OrderBook` and `LadderBook` holds, narrows, or widens under that kind of
-burst is an open question until this same harness runs against a real
-NASDAQ ITCH day file, which `./build/bench /path/to/day.NASDAQ_ITCH50` already
-supports.
+The benchmark ran only against a synthetic session for a long time, and
+that was worth saying plainly rather than glossing over. The synthetic
+generator uses fixed message-type weights and draws prices from stable
+per-symbol bands — it doesn't reproduce the bursty, clustered order flow
+real exchanges see around the open and close, when message rates and
+cancel/replace churn both spike well past a steady-state average. Whether
+the tail gap between `OrderBook` and `LadderBook` holds, narrows, or widens
+under that kind of burst was an open question until this same harness ran
+against a real NASDAQ ITCH day file, which `./build/bench
+/path/to/day.NASDAQ_ITCH50` already supported. See "Closing the open
+question" below for what actually happened when it did.
 
 ## From benchmark exhibit to production default
 
@@ -132,3 +133,118 @@ running the new wiring against realistic data and noticing the numbers
 didn't smell right, not just getting a clean compile. `unknown_refs` returned
 to 0 immediately after, and the full test suite (94 cases, including the
 three-way full-day invariant check) stayed green throughout.
+
+## Closing the open question: a real NASDAQ day
+
+`./build/bench` and `./build/replay` were run against
+[`12302019.NASDAQ_ITCH50.gz`](https://emi.nasdaq.com/ITCH/Nasdaq%20ITCH/12302019.NASDAQ_ITCH50.gz),
+NASDAQ's full public day file for Dec 30, 2019 — 3,524,013,057 bytes
+gzipped, ~8.25 GB decompressed, 268,744,780 frames across 8,892 symbols.
+Not a slice, not a sample: the entire published day.
+
+Getting the file itself onto the machine turned into its own small saga,
+worth documenting rather than hiding: a plain single-connection `curl` to
+`emi.nasdaq.com` measured well under 100 KB/s in this environment — over 14
+hours for this file at that rate. That's exactly how a previous attempt at
+this same validation ended up as a 688 MB truncated `.gz` sitting in the
+repo root: `gzip -t` rejected it with "unexpected end of file" and
+`./build/replay` correctly refused to parse it ("gzip stream truncated
+before end marker") rather than silently short-changing the numbers on a
+partial file — the download had simply never finished. Splitting the same
+download into many concurrent byte-range requests instead of one stream
+(`bench/fetch_itch_day.sh`, ~16-way parallel, retries per-chunk, verifies
+size + `gzip -t` before declaring success) got aggregate throughput to
+roughly 1 MB/s and the complete file down in under an hour. The result's
+size matches the server's published `Content-Length` exactly and passes
+`gzip -t` clean — the thing this whole exercise was blocked on.
+
+### The numbers, and why they come with an asterisk
+
+| type | OrderBook p50 | LadderBook p50 | OrderBook p999 | LadderBook p999 |
+|------|--------------:|---------------:|----------------:|-----------------:|
+| A    | 167 ns        | 42 ns          | 1,209 ns        | 791 ns           |
+| E    | 208 ns        | 42 ns          | 1,459 ns        | 833 ns           |
+| C    | 84 ns         | 42 ns          | 1,375 ns        | 708 ns           |
+| X    | 83 ns         | 42 ns          | 1,125 ns        | 583 ns           |
+| D    | 167 ns        | 42 ns          | 1,458 ns        | 1,041 ns         |
+| U    | 375 ns        | 125 ns         | 2,041 ns        | 1,542 ns         |
+
+Full breakdown: [bench/results_real_day.csv](../bench/results_real_day.csv).
+This is a separate file, not an overwrite of the committed synthetic
+baseline in [bench/results.csv](../bench/results.csv) that the README
+quotes — for reasons that follow, these real-day numbers aren't yet good
+enough to replace that baseline.
+
+At face value, `LadderBook` is still faster than `OrderBook` at every
+percentile for every message type — the *direction* of the original claim
+holds on real data. But the same runs reported something that has to be
+dealt with before the *magnitude* can be trusted: `unknown_refs` came back
+**0** for `OrderBook` and **80,712,122** for `LadderBook` — about 30% of the
+263,241,937 order-book-mutating messages in the file. This wasn't a
+benchmark-harness quirk: `./build/replay --map` (0 unknown refs) versus
+`./build/replay` (80,712,122 unknown refs) against the identical file
+confirmed it independently, through the actual production
+`pipeline::BookTable` path, not `bench/bench_main.cpp`'s own bookkeeping.
+
+This is the same class of bug "From benchmark exhibit to production
+default" above already found once — a rejected mutation is a cheap early
+return, not the array-index write the benchmark exists to measure, and that
+makes the rejecting book's numbers look faster than they really are, for
+the same reason a `false` return from a duplicate-ref `add()` always will.
+Last time the cause was tick-grid misalignment; this time it's
+`BookTraits<LadderBook>`'s fixed `kWindowPct = 0.30`
+(`include/pipeline/dispatch_to_book.hpp`): a ladder built ±30% around the
+first `'A'` price seen for a locate has no way to widen later (see "What
+LadderBook actually gives up" above), and across 8,892 real symbols over a
+full trading day — versus the synthetic generator's 9 symbols drawing from
+stable per-symbol bands — a fixed 30% window is nowhere near wide enough
+for every name. `OrderBook`'s unbounded ladders have no such ceiling, which
+is exactly why its `unknown_refs` stayed at 0 on the same file.
+
+So this run can't cleanly confirm or refute the synthetic-data tail-gap
+story as-is: roughly 3 in 10 of `LadderBook`'s timed mutations here were
+fast rejections, not real work, which biases its numbers above optimistic
+in the same direction the tick-grid bug's numbers once were. What this run
+*can* say cleanly, because it comes from `OrderBook`'s side (0 unknown
+refs, every sample a real mutation): the absolute tail gap on real data is
+far narrower than the synthetic session suggested — p999 gaps of a few
+hundred nanoseconds here (417–667 ns across the six types above) versus
+several thousand on the synthetic session (5,292–10,416 ns in
+`bench/results.csv`). The likeliest reason isn't that the tree-vs-array
+tradeoff itself changed; it's that the synthetic session concentrates 2.2M
+messages into 9 symbols — deep, hot per-symbol books, with `std::map`
+rebalancing at real depth on every insert/erase — while a real day spreads
+268.7M frames across 8,892 symbols, most of them shallow most of the time.
+A smaller `n` most of the time means less for `OrderBook`'s O(log n) tree
+work to do, which narrows its own tail regardless of what `LadderBook` is
+doing alongside it. Message-rate burstiness around the open/close — the
+original reason this question was open — turns out not to be the dominant
+effect; symbol-count breadth is.
+
+### What actually closes this
+
+Not this run, not yet. Two concrete, scoped follow-ups — neither one is
+blocked on downloading the file again, since `bench/fetch_itch_day.sh` now
+exists as a documented, known-working (if not fast) way to get it back:
+
+1. Fix `BookTraits<LadderBook>`'s window so `unknown_refs` on this same
+   file drops to 0 for `LadderBook` too — widen `kWindowPct`, derive it
+   from something less arbitrary than a flat 30%, or let `LadderBook`
+   rebuild itself wider the first time an `add()` lands outside the
+   current window instead of rejecting it outright. Only once that's true
+   are `LadderBook`'s latency numbers measuring the same thing
+   `OrderBook`'s already are on this file.
+2. Re-run the comparison once that fix lands, and only then fold real-day
+   numbers into "What the benchmark actually shows" above (and the
+   README's copy of that table) as the primary claim — replacing the
+   synthetic-only numbers, not just appending real ones alongside them.
+
+Until then, the honest state of the original open question is: **the
+tree-vs-array *direction* of the claim held up on a real, complete NASDAQ
+day file; the *magnitude* did not, in either direction the synthetic
+numbers would have predicted, and roughly a third of `LadderBook`'s side of
+that magnitude is currently unreliable, for a specific, understood, fixable
+reason.** That's a real answer, not a shrug — it's just not the answer "the
+synthetic numbers were right all along" would have been, and it's a more
+useful place to have landed than either an untested claim or another
+truncated download.
