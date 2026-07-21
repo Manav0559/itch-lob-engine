@@ -35,12 +35,15 @@ static server, not just `python3 -m http.server`) is required.
    table of the SPSC queue round-trip latencies from the same file.
 3. **CI performance ratio over commits** — LadderBook/OrderBook p50 ratio,
    averaged across message types, per commit recorded to
-   `bench/ci_history.csv` (faceted by OS). `bench/ci_history.csv` currently
-   only has a header row (the CI workflow doesn't call
-   `bench/check_budget.py record` yet — see `bench/CI_INTEGRATION.md`), so
-   this section shows an empty-state message until that's wired up and a
-   few commits land. No changes to the dashboard are needed when it is —
-   it reads whatever rows are there.
+   `bench/ci_history.csv` (faceted by OS). The CI workflow now calls
+   `bench/check_budget.py record` on every push to main and commits the
+   resulting row back automatically (see `.github/workflows/ci.yml` and
+   `bench/CI_INTEGRATION.md`), so `bench/ci_history.csv` already has real
+   rows and this section renders the chart directly. It still shows the
+   empty-state message on a fresh checkout of a branch that hasn't had CI
+   land on it yet, or if `bench/ci_history.csv` is ever reset back to just
+   its header row — no dashboard changes are needed either way, it reads
+   whatever rows are there.
 
 ## Refreshing the data
 

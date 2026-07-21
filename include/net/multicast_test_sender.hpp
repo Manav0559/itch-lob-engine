@@ -114,6 +114,18 @@ public:
         send_all([](std::uint64_t) { return false; });
     }
 
+    // Sends one data-channel packet with an arbitrary sequence number and
+    // payload, bypassing load()/send_all()'s in-order framing entirely —
+    // for tests that need to simulate a sender racing far ahead of the
+    // receiver, or one emitting corrupted/out-of-range sequence numbers.
+    // That's exactly the scenario net::MoldUdp64Receiver's `pending_` size
+    // cap exists to bound (see kMaxPendingPackets in
+    // include/net/multicast_receiver.hpp), so this is what a test exercising
+    // that cap sends.
+    void send_raw(std::uint64_t seq, std::uint16_t count, const std::vector<std::uint8_t>& payload = {}) {
+        send_data_packet(seq, count, payload);
+    }
+
     // Sends a MoldUDP64 heartbeat: a packet with no message blocks, used by
     // the real protocol to let a receiver confirm the session is still
     // alive (and, implicitly, what sequence number comes next) during a

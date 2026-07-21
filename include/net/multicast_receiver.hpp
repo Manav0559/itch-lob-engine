@@ -158,9 +158,12 @@ private:
 // are requested/replayed one packet per sequence number rather than
 // re-batched; a bounded number of gap-fill round trips are attempted before
 // giving up on a given gap (a real feed handler would also fall back to a
-// snapshot/refresh mechanism, which is out of scope here); and there is no
+// snapshot/refresh mechanism, which is out of scope here); there is no
 // separate heartbeat *generation* on this side (only handling of heartbeats
-// the sender emits) since this is a receiver.
+// the sender emits) since this is a receiver; and `pending_` (the
+// not-yet-contiguous packet buffer described above) is bounded by a hard
+// cap, kMaxPendingPackets — see its comment below for why and what happens
+// at the cap.
 class MoldUdp64Receiver {
 public:
     // `session` must match the sender's session id exactly — packets
@@ -215,6 +218,36 @@ public:
     bool session_ended() const { return ended_; }
     std::uint64_t gap_fill_requests_sent() const { return requests_sent_; }
     std::size_t pending_count() const { return pending_.size(); }
+    // Packets refused because `pending_` was already at kMaxPendingPackets
+    // when they arrived — see that constant's comment. Nonzero means a
+    // sender is racing far enough ahead of this receiver (or sending
+    // sequence numbers so corrupted/out-of-range they never resolve into a
+    // real gap-fill) that packets are being discarded outright rather than
+    // buffered; a caller that cares (metrics, logs) should watch this
+    // alongside gap_fill_requests_sent().
+    std::uint64_t dropped_pending_count() const { return dropped_pending_; }
+
+    // Hard cap on how many not-yet-contiguous packets `pending_` (see the
+    // class comment's "Gap handling" paragraph) will ever hold at once.
+    // Without this, a sender that races far ahead of a stalled/slow
+    // receiver — or one that (by bug or malice) sends sequence numbers so
+    // corrupted/out-of-range they never resolve into a satisfiable gap —
+    // would grow `pending_` without bound: every out-of-order packet gets
+    // buffered keyed by its sequence number regardless of how far ahead of
+    // next_seq_ it sits. This project's own fixtures/demos (see
+    // tests/test_moldudp64.cpp) never buffer more than a handful of packets
+    // at once even mid-gap-fill, so this is a generous multiple of that,
+    // not a tight budget — while still turning "unbounded" into a fixed
+    // worst case (kMaxPendingPackets * 65536-byte max datagram). Once full,
+    // a new sequence number is simply refused (counted via
+    // dropped_pending_count(), not silently swallowed) rather than
+    // evicting something already buffered; a real feed handler at this
+    // point would typically fall back to a snapshot/refresh, which — like
+    // the class comment's other simplifications — is out of scope here. A
+    // refused packet isn't gone forever: once earlier packets drain and
+    // free up room, the ordinary gap-fill path (resolve_gaps(), below)
+    // will re-request it like any other missing sequence number.
+    static constexpr std::size_t kMaxPendingPackets = 256;
 
 private:
     struct PendingPacket {
@@ -249,10 +282,25 @@ private:
     std::size_t accept(std::uint64_t seq, std::uint16_t count, const std::uint8_t* payload,
                        std::size_t len, Handler& handler) {
         if (seq < next_seq_) return 0;  // already applied (duplicate/late retransmit) — ignore
-        pending_.emplace(seq, PendingPacket{count, std::vector<std::uint8_t>(payload, payload + len)});
+        buffer(seq, count, payload, len);
 
         resolve_gaps();
         return drain(handler);
+    }
+
+    // Inserts (or overwrites, for a sequence number already buffered) one
+    // entry into `pending_`, subject to kMaxPendingPackets — see its
+    // comment. A brand-new sequence number is refused (counted via
+    // dropped_pending_) when the map is already full; overwriting an
+    // existing key never grows the map, so it's never refused even at
+    // capacity (e.g. a gap-fill reply for a sequence number some other
+    // packet already buffered).
+    void buffer(std::uint64_t seq, std::uint16_t count, const std::uint8_t* payload, std::size_t len) {
+        if (pending_.size() >= kMaxPendingPackets && pending_.find(seq) == pending_.end()) {
+            ++dropped_pending_;
+            return;
+        }
+        pending_.insert_or_assign(seq, PendingPacket{count, std::vector<std::uint8_t>(payload, payload + len)});
     }
 
     // While the earliest buffered packet is still ahead of next_seq_ (a
@@ -286,10 +334,10 @@ private:
                 if (h.count == moldudp64::kHeartbeat || h.count == moldudp64::kEndOfSession) continue;
                 if (h.seq < next_seq_) continue;  // stale reply — already applied
 
-                pending_.emplace(h.seq, PendingPacket{h.count,
-                                 std::vector<std::uint8_t>(buf + moldudp64::kHeaderLen,
-                                                            buf + n)});
-                if (pending_.begin()->first == next_seq_) break;  // this gap is closed — re-check outer loop
+                buffer(h.seq, h.count, buf + moldudp64::kHeaderLen,
+                      static_cast<std::size_t>(n) - moldudp64::kHeaderLen);
+                if (!pending_.empty() && pending_.begin()->first == next_seq_)
+                    break;  // this gap is closed — re-check outer loop
             }
         }
     }
@@ -322,6 +370,7 @@ private:
     std::uint64_t next_seq_ = kFirstSeq;
     bool ended_ = false;
     std::uint64_t requests_sent_ = 0;
+    std::uint64_t dropped_pending_ = 0;
     std::map<std::uint64_t, PendingPacket> pending_;
 };
 
