@@ -20,8 +20,24 @@ jobs:
         os: [ubuntu-latest, macos-latest]
     runs-on: ${{ matrix.os }}
 
+    # Needed only for the "Commit updated ci_history.csv" step below, which
+    # pushes bench/ci_history.csv back to main after a successful push-to-main
+    # build. Scoped to this job (not the workflow) so sanitize/fuzz-smoke never
+    # get a write-capable token they have no use for. On pull_request runs --
+    # including PRs from forks -- GitHub always forces GITHUB_TOKEN to
+    # read-only regardless of this block, so this is a no-op except on push.
+    permissions:
+      contents: write
+
     steps:
+      # fetch-depth: 0 (full history, not the default shallow depth-1 clone)
+      # so the "Commit updated ci_history.csv" step's `git pull --rebase` can
+      # actually rebase against origin/main instead of choking on missing
+      # history when the other matrix leg has pushed a commit in the
+      # meantime.
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Configure
         run: cmake -B build -DCMAKE_BUILD_TYPE=Release
@@ -55,12 +71,12 @@ jobs:
         # threshold to paper over noise on one run.
         #
         # Drift warnings (informational, never fail the build) need
-        # bench/ci_history.csv to accumulate real numbers over time; that
-        # part of bench/CI_INTEGRATION.md's recommendation (auto-commit
-        # history back to main from CI) is deliberately not wired in here,
-        # since it requires granting the workflow push permissions — record
-        # history manually (`python3 bench/check_budget.py record`) after a
-        # performance-sensitive change instead, if desired.
+        # bench/ci_history.csv to accumulate real numbers over time. That
+        # history is recorded and committed back to main automatically by the
+        # two steps below (repo Actions "Workflow permissions" is now "Read
+        # and write", so this no longer needs a human to run
+        # `python3 bench/check_budget.py record` by hand — see
+        # bench/CI_INTEGRATION.md).
         run: |
           for attempt in 1 2 3; do
             echo "=== bench + budget check, attempt $attempt/3 ==="
@@ -71,6 +87,47 @@ jobs:
             echo "attempt $attempt failed the ratio budget; retrying if attempts remain"
           done
           echo "all 3 attempts failed the ratio budget — this is a real regression, not noise"
+          exit 1
+
+      # Only runs after a *successful* benchmark + budget-check run (the step
+      # above must have exited 0 for this one to execute at all), and only for
+      # a push that landed on main -- never for pull_request events, so a PR
+      # from a fork (or from a branch) can't get history recorded for
+      # numbers that never merged, and never gets a write-capable token in
+      # the first place (GitHub forces GITHUB_TOKEN read-only on pull_request
+      # runs regardless of the `permissions` block above).
+      - name: Record benchmark history
+        if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+        run: python3 bench/check_budget.py record
+
+      # Commits bench/ci_history.csv back to main using the default
+      # GITHUB_TOKEN (see the job-level `permissions: contents: write` above).
+      # Only commits if `record` actually changed the file -- re-running for a
+      # commit/os pair already present in history is a no-op (see
+      # check_budget.py's `record` idempotency), so `git diff --staged --quiet`
+      # guards against empty commits. Both matrix legs (ubuntu-latest,
+      # macos-latest) append different rows for the same commit and race to
+      # push; the retry loop re-pulls and rebases before each attempt so the
+      # second job's push doesn't get rejected as non-fast-forward.
+      - name: Commit updated ci_history.csv
+        if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add bench/ci_history.csv
+          if git diff --staged --quiet; then
+            echo "bench/ci_history.csv unchanged, nothing to commit"
+            exit 0
+          fi
+          git commit -m "bench: record CI history for ${GITHUB_SHA::12} (${{ matrix.os }})"
+          for i in 1 2 3; do
+            if git pull --rebase origin main && git push origin HEAD:main; then
+              exit 0
+            fi
+            echo "push attempt $i failed (likely racing the other matrix leg); retrying"
+            sleep $((RANDOM % 5 + 1))
+          done
+          echo "failed to push bench/ci_history.csv after 3 attempts"
           exit 1
 
       # Linux-only: pipeline::pin_this_thread_to_core is a REAL hard pin here
