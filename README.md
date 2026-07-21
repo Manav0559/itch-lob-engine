@@ -70,6 +70,18 @@ repo.
       merged distinct real price levels once fed actual exchange data instead
       of grid-perfect synthetic prices — see
       [docs/devlog-orderbook-vs-ladderbook.md](docs/devlog-orderbook-vs-ladderbook.md).
+- [x] Validated against a real, complete NASDAQ day file (not just the
+      synthetic session): `./build/bench` and `./build/replay` against the
+      full public Dec 30, 2019 file (268.7M frames, 8,892 symbols) confirm
+      `LadderBook` stays faster than `OrderBook` at every percentile, but
+      also surfaced a second real bug in the same family as the one above —
+      `LadderBook`'s fixed ±30% construction-time price window rejects
+      ~30% of mutations on a real day's worth of real price action, which
+      OrderBook's unbounded ladders never do — see
+      [docs/devlog-orderbook-vs-ladderbook.md](docs/devlog-orderbook-vs-ladderbook.md#closing-the-open-question-a-real-nasdaq-day)
+      for the numbers, the root cause, and what fixing it requires before
+      the real-day results can replace the synthetic ones above as the
+      primary claim.
 - [x] Full-day invariant suite: a synthetic trading day replayed through
       `OrderBook`, `LadderBook`, and an independent from-scratch reference
       model, cross-checked against each other at every 250-message checkpoint
@@ -223,6 +235,21 @@ Run the pipeline end-to-end without any data file:
 NASDAQ publishes free full-day sample files (several GB gzipped, ~13 GB
 uncompressed — plan disk accordingly):
 <https://emi.nasdaq.com/ITCH/Nasdaq%20ITCH/>
+
+A plain `curl -o file url` against that host can be surprisingly slow
+depending on your network path — well under 100 KB/s was measured in one
+dev environment, which turns a multi-GB file into a multi-hour download and
+risks exactly the failure mode `./build/replay` is built to catch: a
+download that never finishes leaves a truncated `.gz` that `gzip -t`
+rejects with "unexpected end of file" and `./build/replay` correctly
+refuses to parse ("gzip stream truncated before end marker") rather than
+silently running on a partial day. `bench/fetch_itch_day.sh <name>` (e.g.
+`bench/fetch_itch_day.sh 12302019`) fetches the same file via many
+parallel byte-range requests instead, and verifies size + `gzip -t` before
+declaring success — see [bench/README.md](bench/README.md) and
+[docs/devlog-orderbook-vs-ladderbook.md](docs/devlog-orderbook-vs-ladderbook.md#closing-the-open-question-a-real-nasdaq-day)
+for the full story, including what running against a complete real day
+file actually surfaced.
 
 ```bash
 ./build/replay 12302019.NASDAQ_ITCH50.gz   # streams the gzip directly, chunk by chunk
