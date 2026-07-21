@@ -139,6 +139,17 @@ jobs:
             exit 0
           fi
           git commit -m "bench: record CI history for ${GITHUB_SHA::12} (${{ matrix.os }})"
+          # The benchmark steps above regenerate bench/results.csv and
+          # bench/results_threaded.csv in place -- both are tracked files
+          # (see bench/README.md), so by this point they're unstaged
+          # modifications in the working tree. `git pull --rebase` refuses
+          # to run with any unstaged changes present, tracked-but-unrelated
+          # or not, so it failed unconditionally on every push until this
+          # fix -- restore them to what's already committed (ci_history.csv
+          # is the only file this step ever intends to commit; the run's
+          # freshly generated numbers were never meant to be, and rerunning
+          # bench/bench_threaded regenerates them again next time anyway).
+          git checkout -- bench/results.csv bench/results_threaded.csv
           for i in 1 2 3; do
             if git pull --rebase origin main && git push origin HEAD:main; then
               exit 0
