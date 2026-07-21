@@ -115,6 +115,15 @@ cmake --build build --target bench && ./build/bench && python3 bench/plot.py
       (`LadderBook`-backed, the same default production now uses), not
       just decode-in-isolation — 4.6M+ executions across seed runs, clean, no
       crashes found so far; see [fuzz/README.md](fuzz/README.md)
+- [x] Dependency-light static results dashboard (`dashboard/index.html`):
+      client-side `fetch()` of the committed `bench/*.csv` files, hand-rolled
+      inline-SVG charts (no Node/npm, no CDN, no build step) — OrderBook vs.
+      LadderBook latency, threaded vs. single-threaded throughput, and the CI
+      performance-ratio history against the `bench/BUDGET.md` threshold, with
+      light/dark themes and an empty-state per section if a CSV is missing;
+      see [dashboard/README.md](dashboard/README.md) for how to view it
+      (needs a local HTTP server — `python3 -m http.server` — since browsers
+      block `fetch()` against `file://`)
 
 ## Design notes
 
