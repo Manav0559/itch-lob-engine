@@ -3,9 +3,11 @@
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
+#include <map>
 #include <string>
 #include <sys/types.h>
 #include <system_error>
+#include <vector>
 
 #include <arpa/inet.h>
 #include <netinet/in.h>
@@ -13,21 +15,17 @@
 #include <sys/time.h>
 #include <unistd.h>
 
+#include "itch/parser.hpp"
+#include "net/moldudp64.hpp"
+
 namespace net {
 
-// RAII UDP socket joined to a multicast group.
-//
-// SCOPE: this is a proof-of-concept of the multicast delivery MECHANISM —
-// socket setup, group join, and a receive loop that hands frames to the
-// existing itch decoder. Real NASDAQ TotalView-ITCH is delivered live wrapped
-// in NASDAQ's MoldUDP64 session protocol, which adds sequence numbers, gap
-// detection, retransmission requests, and heartbeats on top of raw UDP
-// multicast. MoldUDP64 is a large, well-defined subprotocol in its own right
-// and implementing it is explicitly OUT OF SCOPE here. This class — and the
-// demo built on it — assumes no packet loss and no reordering, which only
-// holds for a same-host loopback demo. A production feed handler needs
-// MoldUDP64 (or equivalent) layered on top of this before it could survive
-// a real network path.
+// RAII UDP socket joined to a multicast group. A thin, protocol-agnostic
+// primitive: socket setup, group join, and a receive() call. MoldUdp64Receiver
+// (below) layers real NASDAQ MoldUDP64 session semantics — sequence
+// numbers, gap detection, retransmission requests, heartbeats — on top of
+// this; this class by itself makes no assumption about what's inside a
+// datagram.
 //
 // This is a system-call boundary the same way io::MmapSource's construction
 // is (see include/io/mmap_source.hpp): socket/bind/setsockopt can all fail
@@ -131,6 +129,200 @@ public:
 
 private:
     int fd_ = -1;
+};
+
+// Real MoldUDP64 session layer on top of MulticastReceiver: sequence-gap
+// detection plus a basic gap-fill mechanism, per NASDAQ's public MoldUDP64
+// spec.
+//
+// Two channels, matching the spec's split between them:
+//   - the data channel: the joined multicast group, delivering the live
+//     feed as a sequence of MoldUDP64 packets (session header + message
+//     blocks, or a heartbeat/end-of-session sentinel).
+//   - the request channel: a plain unicast UDP socket used to send
+//     retransmission requests to the sender's request port and receive its
+//     replies — the standard MoldUDP64 request/response pattern (the
+//     reply's destination is whatever ephemeral port the request was sent
+//     from, the normal connectionless-UDP request/reply idiom, so this
+//     socket needs no fixed local port of its own).
+//
+// Gap handling: `poll()` decodes one data-channel packet and buffers it
+// (keyed by sequence number) rather than assuming packets arrive in order.
+// After every packet — from either channel — it drains any run of buffered
+// packets starting at the next expected sequence number straight into
+// itch::parse_stream, so the itch::parse_stream / BookBuilder integration
+// downstream is untouched: this class only decides *when* a byte buffer is
+// safe to hand to parse_stream, never how it's parsed.
+//
+// SIMPLIFICATIONS versus the full spec (documented, not hidden): messages
+// are requested/replayed one packet per sequence number rather than
+// re-batched; a bounded number of gap-fill round trips are attempted before
+// giving up on a given gap (a real feed handler would also fall back to a
+// snapshot/refresh mechanism, which is out of scope here); and there is no
+// separate heartbeat *generation* on this side (only handling of heartbeats
+// the sender emits) since this is a receiver.
+class MoldUdp64Receiver {
+public:
+    // `session` must match the sender's session id exactly — packets
+    // belonging to a different session are ignored (the spec allows a
+    // group to be reused across trading sessions; a receiver joined
+    // mid-transition should not splice two sessions' sequence numbers
+    // together).
+    MoldUdp64Receiver(const std::string& group, std::uint16_t data_port,
+                      const std::string& request_host, std::uint16_t request_port,
+                      moldudp64::SessionId session,
+                      std::chrono::milliseconds data_recv_timeout = std::chrono::milliseconds(200),
+                      std::chrono::milliseconds gap_fill_timeout = std::chrono::milliseconds(200))
+        : data_(group, data_port, data_recv_timeout),
+          session_(session),
+          gap_fill_timeout_(gap_fill_timeout) {
+        request_fd_ = ::socket(AF_INET, SOCK_DGRAM, 0);
+        if (request_fd_ < 0)
+            throw std::system_error(errno, std::generic_category(), "socket failed (request channel)");
+
+        request_addr_.sin_family = AF_INET;
+        request_addr_.sin_port = htons(request_port);
+        if (::inet_pton(AF_INET, request_host.c_str(), &request_addr_.sin_addr) != 1) {
+            const int err = errno;
+            ::close(request_fd_);
+            throw std::system_error(err, std::generic_category(),
+                                    "invalid request-channel host: " + request_host);
+        }
+        moldudp64::set_recv_timeout(request_fd_, gap_fill_timeout_);
+    }
+
+    ~MoldUdp64Receiver() {
+        if (request_fd_ >= 0) ::close(request_fd_);
+    }
+
+    MoldUdp64Receiver(const MoldUdp64Receiver&) = delete;
+    MoldUdp64Receiver& operator=(const MoldUdp64Receiver&) = delete;
+
+    // Reads and processes exactly one datagram from the data channel:
+    // returns the number of itch frames dispatched to `handler` as a
+    // result (0 for a timeout/error, a heartbeat, a duplicate, or a packet
+    // that's still buffered pending a gap-fill). A caller loops this the
+    // same way it would loop MulticastReceiver::receive() directly.
+    template <typename Handler>
+    std::size_t poll(Handler& handler) {
+        std::uint8_t buf[65536];
+        const ssize_t n = data_.receive(buf, sizeof(buf));
+        if (n < static_cast<ssize_t>(moldudp64::kHeaderLen)) return 0;
+        return on_packet(buf, static_cast<std::size_t>(n), handler);
+    }
+
+    std::uint64_t next_seq() const { return next_seq_; }
+    bool session_ended() const { return ended_; }
+    std::uint64_t gap_fill_requests_sent() const { return requests_sent_; }
+    std::size_t pending_count() const { return pending_.size(); }
+
+private:
+    struct PendingPacket {
+        std::uint16_t count;
+        std::vector<std::uint8_t> payload;  // concatenated message blocks (an itch::parse_stream buffer)
+    };
+
+    // Sequence numbers start at 1 per the spec; 0 means "nothing applied yet".
+    static constexpr std::uint64_t kFirstSeq = 1;
+    static constexpr int kMaxGapFillAttempts = 5;
+
+    template <typename Handler>
+    std::size_t on_packet(const std::uint8_t* buf, std::size_t n, Handler& handler) {
+        const moldudp64::Header hdr = moldudp64::decode(buf);
+        if (!moldudp64::same_session(hdr.session, session_)) return 0;
+
+        if (hdr.count == moldudp64::kEndOfSession) {
+            ended_ = true;
+            return 0;
+        }
+        if (hdr.count == moldudp64::kHeartbeat) return 0;  // no message blocks in this packet
+
+        return accept(hdr.seq, hdr.count, buf + moldudp64::kHeaderLen,
+                      n - moldudp64::kHeaderLen, handler);
+    }
+
+    // Buffers one packet's message blocks (keyed by its starting sequence
+    // number — duplicates of an already-buffered or already-applied
+    // sequence number are dropped), then attempts to close any open gap and
+    // drains whatever is now contiguous with next_seq_.
+    template <typename Handler>
+    std::size_t accept(std::uint64_t seq, std::uint16_t count, const std::uint8_t* payload,
+                       std::size_t len, Handler& handler) {
+        if (seq < next_seq_) return 0;  // already applied (duplicate/late retransmit) — ignore
+        pending_.emplace(seq, PendingPacket{count, std::vector<std::uint8_t>(payload, payload + len)});
+
+        resolve_gaps();
+        return drain(handler);
+    }
+
+    // While the earliest buffered packet is still ahead of next_seq_ (a
+    // gap), request the missing range and wait (bounded) for a reply on the
+    // request channel, buffering whatever comes back the same way a
+    // data-channel packet is buffered. Gives up after kMaxGapFillAttempts
+    // requests, leaving the gap for a later packet/poll to retry.
+    void resolve_gaps() {
+        int attempts = 0;
+        while (!pending_.empty() && pending_.begin()->first > next_seq_ &&
+               attempts < kMaxGapFillAttempts) {
+            const std::uint64_t gap_start = next_seq_;
+            const std::uint64_t missing = pending_.begin()->first - next_seq_;
+            const std::uint16_t request_count =
+                static_cast<std::uint16_t>(std::min<std::uint64_t>(missing, 0xFFFEull));
+
+            send_request(gap_start, request_count);
+            ++requests_sent_;
+            ++attempts;
+
+            std::uint8_t buf[65536];
+            const auto deadline = std::chrono::steady_clock::now() + gap_fill_timeout_;
+            while (std::chrono::steady_clock::now() < deadline) {
+                const ssize_t n = ::recv(request_fd_, buf, sizeof(buf), 0);
+                if (n < static_cast<ssize_t>(moldudp64::kHeaderLen)) {
+                    if (errno == EAGAIN || errno == EWOULDBLOCK) break;  // this attempt timed out
+                    continue;                                            // EINTR or a short read — retry
+                }
+                const moldudp64::Header h = moldudp64::decode(buf);
+                if (!moldudp64::same_session(h.session, session_)) continue;
+                if (h.count == moldudp64::kHeartbeat || h.count == moldudp64::kEndOfSession) continue;
+                if (h.seq < next_seq_) continue;  // stale reply — already applied
+
+                pending_.emplace(h.seq, PendingPacket{h.count,
+                                 std::vector<std::uint8_t>(buf + moldudp64::kHeaderLen,
+                                                            buf + n)});
+                if (pending_.begin()->first == next_seq_) break;  // this gap is closed — re-check outer loop
+            }
+        }
+    }
+
+    template <typename Handler>
+    std::size_t drain(Handler& handler) {
+        std::size_t frames = 0;
+        while (!pending_.empty() && pending_.begin()->first == next_seq_) {
+            auto node = pending_.begin();
+            frames += itch::parse_stream(node->second.payload.data(), node->second.payload.size(), handler);
+            next_seq_ += node->second.count;
+            pending_.erase(node);
+        }
+        return frames;
+    }
+
+    void send_request(std::uint64_t seq, std::uint16_t count) {
+        std::vector<std::uint8_t> pkt;
+        moldudp64::encode(pkt, moldudp64::Header{session_, seq, count});
+        ::sendto(request_fd_, pkt.data(), pkt.size(), 0,
+                reinterpret_cast<sockaddr*>(&request_addr_), sizeof(request_addr_));
+    }
+
+    MulticastReceiver data_;
+    moldudp64::SessionId session_;
+    std::chrono::milliseconds gap_fill_timeout_;
+    int request_fd_ = -1;
+    sockaddr_in request_addr_{};
+
+    std::uint64_t next_seq_ = kFirstSeq;
+    bool ended_ = false;
+    std::uint64_t requests_sent_ = 0;
+    std::map<std::uint64_t, PendingPacket> pending_;
 };
 
 }  // namespace net
