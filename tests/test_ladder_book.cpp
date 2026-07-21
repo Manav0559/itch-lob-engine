@@ -1,5 +1,7 @@
 #include <catch2/catch_test_macros.hpp>
 
+#include <cstdint>
+
 #include "book/ladder_book.hpp"
 
 using book::LadderBook;
@@ -130,4 +132,38 @@ TEST_CASE("price outside the ladder window is rejected like a duplicate ref [lad
 
     REQUIRE(b.add(1, Side::Buy, 100, 12'000'000));      // ceiling itself is in range
     CHECK(b.best_bid()->price == 12'000'000);
+}
+
+TEST_CASE("base_price near UINT32_MAX does not overflow the window into an oversized ladder [ladder]") {
+    // Regression test for a real bug: window_high used to compute
+    // base_price + static_cast<uint32_t>(base_price*window_pct) entirely in
+    // uint32_t, which overflows past UINT32_MAX for a base_price this
+    // large. That could land max_price_ below min_price_, and the
+    // constructor's unsigned (max_price_ - min_price_) would then underflow
+    // to a huge tick count and attempt a multi-gigabyte vector allocation
+    // per LadderBook — reachable from an untrusted wire price via
+    // pipeline::BookTraits<LadderBook> (see dispatch_to_book.hpp, which
+    // additionally clamps this at the call site as the production-facing
+    // fix; this test checks the class itself never produces an inverted or
+    // absurd range, for any caller, clamped or not).
+    //
+    // base_price and tick_size are both round multiples of 10'000'000 so
+    // base_price lands on the post-snap grid exactly — keeping this test's
+    // own allocation to ~130 ticks instead of needing tick_size=1 (which
+    // would demonstrate the same fix but at a genuinely multi-gigabyte
+    // allocation size, wasteful under CI, especially under ASan's redzones).
+    LadderBook b(4'290'000'000u, /*tick_size=*/10'000'000u, /*window_pct=*/0.30);
+
+    // Constructing at all (no crash, no throw, no oversized allocation) is
+    // the headline assertion. Functionally: the reference price itself must
+    // still be accepted and reported back correctly, proving max_price_
+    // saturated (not wrapped) above it rather than inverting below it.
+    CHECK(b.add(1, Side::Buy, 100, 4'290'000'000u));
+    CHECK(b.best_bid()->price == 4'290'000'000u);
+}
+
+TEST_CASE("base_price of 0 with a tiny window still yields a valid, addable ladder [ladder]") {
+    LadderBook b(0, /*tick_size=*/1, /*window_pct=*/0.30);
+    CHECK(b.add(1, Side::Buy, 100, 0));
+    CHECK(b.best_bid()->price == 0);
 }

@@ -48,6 +48,25 @@ jobs:
       - name: Test
         run: ctest --test-dir build --output-on-failure
 
+      # Every other build in this file (this job's Release, sanitize's
+      # RelWithDebInfo) sets NDEBUG by CMake convention, which compiles
+      # every assert() in the codebase to a no-op — an entire class of
+      # precondition-contract regression (see exec/twap.hpp and friends,
+      # which had exactly this gap until it was found and fixed) would
+      # otherwise be invisible to every job at once. This Debug build
+      # exists solely so assert() means something somewhere in the matrix.
+      - name: Configure (Debug, asserts enabled)
+        run: cmake -B build-debug -DCMAKE_BUILD_TYPE=Debug
+
+      # All targets, not just unit_tests: ctest's replay_selftest case execs
+      # the real `replay` binary (see CMakeLists.txt's add_test), so it has
+      # to exist in this build directory too, not just build/'s Release one.
+      - name: Build (Debug)
+        run: cmake --build build-debug --parallel
+
+      - name: Test (Debug, asserts enabled)
+        run: ctest --test-dir build-debug --output-on-failure
+
       - name: Build bench
         run: cmake --build build --parallel --target bench
 
