@@ -1,6 +1,8 @@
 #pragma once
+#include <algorithm>
 #include <cstdint>
 #include <optional>
+#include <stdexcept>
 #include <unordered_map>
 #include <vector>
 
@@ -121,10 +123,22 @@ private:
     LadderBook(std::uint32_t tick_size, std::uint32_t min_price, std::uint32_t max_price)
         : tick_size_(tick_size),
           min_price_(min_price),
-          max_price_(max_price),
+          max_price_(check_range(min_price, max_price)),
           num_ticks_(static_cast<std::size_t>(max_price_ - min_price_) / tick_size_ + 1),
           bids_(num_ticks_),
           asks_(num_ticks_) {}
+
+    // window_low/window_high now saturate rather than wrap (see above), so
+    // this should never fire in practice — kept as a hard, non-assert
+    // invariant check (throws, survives NDEBUG) rather than trusting the
+    // arithmetic silently, since a uint32_t underflow here would otherwise
+    // turn into an attempted multi-gigabyte vector allocation, not a clean
+    // failure.
+    static std::uint32_t check_range(std::uint32_t min_price, std::uint32_t max_price) {
+        if (max_price < min_price)
+            throw std::invalid_argument("LadderBook: max_price must be >= min_price");
+        return max_price;
+    }
 
     // window_low's own arithmetic (a float multiply then truncate) gives no
     // guarantee the result lands on the tick grid, even when base_price and
@@ -138,12 +152,23 @@ private:
         return (price / tick_size) * tick_size;
     }
 
+    // Computed in uint64_t and saturated at UINT32_MAX rather than plain
+    // uint32_t arithmetic: base_price is caller-supplied (ultimately
+    // wire-derived — see pipeline::BookTraits<LadderBook>), and
+    // base_price + base_price*window_pct overflows uint32_t for any
+    // base_price past roughly UINT32_MAX/(1+window_pct). An unsaturated
+    // overflow here would wrap max_price_ below min_price_, and the
+    // constructor's (max_price_ - min_price_) computation is unsigned — it
+    // would underflow to a huge value and attempt a multi-hundred-MB
+    // vector allocation per LadderBook instead of failing predictably.
     static std::uint32_t window_low(std::uint32_t base_price, double window_pct) {
-        const std::uint32_t window = static_cast<std::uint32_t>(base_price * window_pct);
-        return window < base_price ? base_price - window : 0;
+        const auto window = static_cast<std::uint64_t>(static_cast<double>(base_price) * window_pct);
+        return window < base_price ? static_cast<std::uint32_t>(base_price - window) : 0;
     }
     static std::uint32_t window_high(std::uint32_t base_price, double window_pct) {
-        return base_price + static_cast<std::uint32_t>(base_price * window_pct);
+        const auto window = static_cast<std::uint64_t>(static_cast<double>(base_price) * window_pct);
+        const std::uint64_t high = static_cast<std::uint64_t>(base_price) + window;
+        return static_cast<std::uint32_t>(std::min<std::uint64_t>(high, UINT32_MAX));
     }
 
     bool in_range(std::uint32_t price) const {

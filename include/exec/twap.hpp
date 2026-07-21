@@ -1,7 +1,7 @@
 #pragma once
 #include <array>
-#include <cassert>
 #include <cstddef>
+#include <stdexcept>
 
 #include "exec/execution_strategy.hpp"
 #include "exec/types.hpp"
@@ -35,9 +35,14 @@ struct TwapParams {
 class Twap : public ExecutionStrategy<Twap> {
 public:
     // Precondition: params.start_ts < params.end_ts, params.bin_ns > 0, and
-    // the resulting bin_count fits within kMaxScheduleBins. Violations are
-    // a construction-time contract failure (asserted), not a runtime state
-    // this class has to keep checking on every advance() call.
+    // the resulting bin_count fits within kMaxScheduleBins. Violations throw
+    // std::invalid_argument — a construction-time contract failure, not a
+    // runtime state this class has to keep checking on every advance() call.
+    // Deliberately not assert(): Release/RelWithDebInfo (every configuration
+    // this project builds and tests, including CI's sanitizer jobs) define
+    // NDEBUG, which compiles assert() to nothing — an untrusted bin_ns (e.g.
+    // TwapParams's own default of 1) would then silently overrun schedule_'s
+    // fixed-size std::array instead of failing loudly.
     explicit Twap(const TwapParams& params);
 
     // Advances the schedule to `now`, pushing one child order into
@@ -66,11 +71,13 @@ private:
 };
 
 inline Twap::Twap(const TwapParams& params) : params_(params) {
-    assert(params.start_ts < params.end_ts);
-    assert(params.bin_ns > 0);
+    if (params.start_ts >= params.end_ts)
+        throw std::invalid_argument("Twap: start_ts must be < end_ts");
+    if (params.bin_ns == 0) throw std::invalid_argument("Twap: bin_ns must be > 0");
     const Timestamp span = params.end_ts - params.start_ts;
     bin_count_ = static_cast<std::size_t>((span + params.bin_ns - 1) / params.bin_ns);
-    assert(bin_count_ > 0 && bin_count_ <= kMaxScheduleBins);
+    if (bin_count_ == 0 || bin_count_ > kMaxScheduleBins)
+        throw std::invalid_argument("Twap: bin_count out of range for kMaxScheduleBins");
 
     // Split total_shares as evenly as possible: every bin gets the integer
     // quotient, and the first `remainder` bins take one extra share each so

@@ -1,9 +1,9 @@
 #pragma once
 #include <array>
-#include <cassert>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <stdexcept>
 
 #include "exec/execution_strategy.hpp"
 #include "exec/types.hpp"
@@ -47,9 +47,12 @@ public:
     // Precondition: params.start_ts < params.end_ts, params.bin_ns > 0,
     // params.risk_aversion >= 0, params.volatility >= 0,
     // params.impact_coefficient > 0, and the resulting bin_count fits
-    // within kMaxScheduleBins. Violations are a construction-time contract
-    // failure (asserted), not a runtime state this class has to keep
-    // checking on every advance() call.
+    // within kMaxScheduleBins. Violations throw std::invalid_argument — a
+    // construction-time contract failure, not a runtime state this class
+    // has to keep checking on every advance() call. Deliberately not
+    // assert(): every configuration this project builds and tests
+    // (Release, RelWithDebInfo) defines NDEBUG, which would compile these
+    // checks away entirely.
     explicit AlmgrenChriss(const AlmgrenChrissParams& params);
 
     // Same bin-crossing semantics as Twap::advance: pushes one child order
@@ -76,14 +79,19 @@ private:
 };
 
 inline AlmgrenChriss::AlmgrenChriss(const AlmgrenChrissParams& params) : params_(params) {
-    assert(params.start_ts < params.end_ts);
-    assert(params.bin_ns > 0);
-    assert(params.risk_aversion >= 0.0);
-    assert(params.volatility >= 0.0);
-    assert(params.impact_coefficient > 0.0);
+    if (params.start_ts >= params.end_ts)
+        throw std::invalid_argument("AlmgrenChriss: start_ts must be < end_ts");
+    if (params.bin_ns == 0) throw std::invalid_argument("AlmgrenChriss: bin_ns must be > 0");
+    if (params.risk_aversion < 0.0)
+        throw std::invalid_argument("AlmgrenChriss: risk_aversion must be >= 0");
+    if (params.volatility < 0.0)
+        throw std::invalid_argument("AlmgrenChriss: volatility must be >= 0");
+    if (params.impact_coefficient <= 0.0)
+        throw std::invalid_argument("AlmgrenChriss: impact_coefficient must be > 0");
     const Timestamp span = params.end_ts - params.start_ts;
     bin_count_ = static_cast<std::size_t>((span + params.bin_ns - 1) / params.bin_ns);
-    assert(bin_count_ > 0 && bin_count_ <= kMaxScheduleBins);
+    if (bin_count_ == 0 || bin_count_ > kMaxScheduleBins)
+        throw std::invalid_argument("AlmgrenChriss: bin_count out of range for kMaxScheduleBins");
 
     const double tau = static_cast<double>(params.bin_ns);
     const double horizon = tau * static_cast<double>(bin_count_);
@@ -97,12 +105,24 @@ inline AlmgrenChriss::AlmgrenChriss(const AlmgrenChrissParams& params) : params_
         kappa = std::acosh(acosh_arg) / tau;
     }
 
-    // kappa*horizon governs how peaked the trajectory is; below this
-    // threshold, sinh(kappa*(T-j*tau))/sinh(kappa*T) is a 0/0 in floating
-    // point (numerator and denominator both collapse to zero together as
-    // kappa -> 0), so fall back to the exact uniform split the formula
-    // degenerates to in that limit rather than let the ratio go unstable.
+    // kappa*horizon governs how peaked the trajectory is. Two extremes need
+    // guarding, both reachable from caller-supplied risk_aversion/volatility
+    // /impact_coefficient with no upper bound of their own:
+    //   - Below kMinKappaHorizon, sinh(kappa*(T-j*tau))/sinh(kappa*T) is a
+    //     0/0 in floating point (numerator and denominator both collapse to
+    //     zero together as kappa -> 0) — fall back to the exact uniform
+    //     split the formula degenerates to in that limit.
+    //   - Above kMaxKappaHorizon, std::sinh(kappa*horizon) overflows to +inf
+    //     (double sinh saturates past an argument of ~710), turning the
+    //     ratio into an inf/inf NaN that would silently corrupt every
+    //     schedule_[i] and, downstream, the Shares cast. The trajectory is
+    //     already numerically a step function (essentially all volume in
+    //     bin 0) well before kappa*horizon reaches 50, so clamping kappa
+    //     itself to that ceiling changes nothing observable while keeping
+    //     every sinh() call finite.
     constexpr double kMinKappaHorizon = 1e-6;
+    constexpr double kMaxKappaHorizon = 50.0;
+    if (kappa * horizon > kMaxKappaHorizon) kappa = kMaxKappaHorizon / horizon;
 
     std::array<double, kMaxScheduleBins> shares_to_trade{};
     if (kappa * horizon < kMinKappaHorizon) {
@@ -132,8 +152,13 @@ inline AlmgrenChriss::AlmgrenChriss(const AlmgrenChrissParams& params) : params_
     }
     const std::int64_t diff = static_cast<std::int64_t>(params.total_shares) - rounded_sum;
     const std::int64_t adjusted_last = static_cast<std::int64_t>(schedule_[n - 1]) + diff;
-    assert(adjusted_last >= 0);
-    schedule_[n - 1] = static_cast<Shares>(adjusted_last);
+    // Defense in depth, not a user-input precondition: with kappa*horizon
+    // now bounded above, the rounding remainder distributed here should
+    // never drive this negative, but clamping (rather than assert(), which
+    // NDEBUG would remove) avoids a negative-to-huge-unsigned wraparound
+    // through the Shares cast if some future change to the math above ever
+    // violates that in practice.
+    schedule_[n - 1] = static_cast<Shares>(adjusted_last < 0 ? 0 : adjusted_last);
 }
 
 inline std::size_t AlmgrenChriss::advance(Timestamp now) {

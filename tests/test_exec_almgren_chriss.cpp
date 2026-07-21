@@ -1,5 +1,8 @@
 #include <catch2/catch_test_macros.hpp>
 
+#include <cmath>
+#include <stdexcept>
+
 #include "exec/almgren_chriss.hpp"
 #include "exec/twap.hpp"
 
@@ -181,4 +184,47 @@ TEST_CASE("on_bbo_change_impl and on_trade_tick_impl push nothing") {
 
     CHECK(ac.bin_count() == 5);
     CHECK_FALSE(ac.done());
+}
+
+TEST_CASE("constructor throws instead of relying on assert() for invalid params (Almgren-Chriss)") {
+    // See the equivalent Twap test for why this must be a real exception —
+    // NDEBUG, set by every build config this project ships (Release,
+    // RelWithDebInfo), compiles assert() away entirely.
+    CHECK_THROWS_AS(AlmgrenChriss(make_params(1000, 500, 0, 100, 1.0)), std::invalid_argument);
+    CHECK_THROWS_AS(AlmgrenChriss(make_params(1000, 0, 500, 0, 1.0)), std::invalid_argument);
+    CHECK_THROWS_AS(AlmgrenChriss(make_params(1000, 0, 500, 100, -1.0)), std::invalid_argument);
+    CHECK_THROWS_AS(
+        AlmgrenChriss(make_params(1000, 0, 500, 100, 1.0, -0.02)), std::invalid_argument);
+    CHECK_THROWS_AS(
+        AlmgrenChriss(make_params(1000, 0, 500, 100, 1.0, 0.02, 0.0)), std::invalid_argument);
+}
+
+TEST_CASE("extreme risk_aversion/volatility never produces NaN or a negative schedule entry") {
+    // Regression test for a real bug: before kappa*horizon was clamped,
+    // large enough risk_aversion/volatility drove std::sinh(kappa*horizon)
+    // to +inf, turning the schedule's inf/inf ratio into NaN — which
+    // std::llround + a Shares (uint32_t) cast would then turn into a
+    // garbage, silently-accepted share count instead of a visible failure.
+    struct Case {
+        double risk_aversion;
+        double volatility;
+        double impact_coefficient;
+    };
+    const Case cases[] = {
+        {1e6, 0.02, 0.001},    // huge risk_aversion
+        {1.0, 100.0, 0.001},   // huge volatility
+        {1e12, 500.0, 1e-9},   // all three pushed toward the overflow edge at once
+    };
+    for (const auto& c : cases) {
+        AlmgrenChriss ac(
+            make_params(50'000, 0, 1000, 100, c.risk_aversion, c.volatility, c.impact_coefficient));
+        ac.advance(1000 + 100);
+        CHECK(ac.done());
+        // If sinh() had overflowed to inf and produced a NaN schedule entry,
+        // std::llround(NaN) followed by the Shares (uint32_t) cast is
+        // implementation-defined — on this project's target platforms it
+        // yields a huge, garbage value, which would blow this sum check far
+        // past total_shares rather than landing on it exactly.
+        CHECK(sum_shares(ac) == 50'000);
+    }
 }
