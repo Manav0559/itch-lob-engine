@@ -1,5 +1,6 @@
 #include <cstddef>
 #include <cstdint>
+#include <stdexcept>
 
 #include <catch2/catch_test_macros.hpp>
 
@@ -207,4 +208,20 @@ TEST_CASE("vwap's opening and closing bucket slices are bigger than a mid-day tr
     // The classic U-shape: heavy at the open and close, light mid-day.
     CHECK(opening_slice > trough_slice);
     CHECK(closing_slice > trough_slice);
+}
+
+TEST_CASE("constructor throws instead of relying on assert() for start_ts >= end_ts") {
+    // See the equivalent Twap test for why this must be a real exception —
+    // NDEBUG (set by every build config this project ships) compiles
+    // assert() away entirely, and bucket_position()/target_shares() divide
+    // by span == end_ts - start_ts, so an unchecked violation here is a
+    // division-by-zero, not just a wrong schedule.
+    VwapParams params;
+    params.total_shares = 100;
+    params.start_ts = 500;
+    params.end_ts = 500;  // equal, not just out of order — still invalid
+    CHECK_THROWS_AS(Vwap(params), std::invalid_argument);
+
+    params.end_ts = 100;  // strictly before start_ts
+    CHECK_THROWS_AS(Vwap(params), std::invalid_argument);
 }
