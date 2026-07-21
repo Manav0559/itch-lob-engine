@@ -35,14 +35,25 @@ jobs:
       - name: Build bench
         run: cmake --build build --parallel --target bench
 
-      - name: Run benchmark
-        run: ./build/bench
-
-      - name: Check performance budget
+      - name: Run benchmark and check performance budget
         # Hard-fails only if LadderBook's measured advantage over OrderBook
         # regresses past bench/check_budget.py's ratio threshold — see
         # bench/BUDGET.md for why this is a same-run ratio check, not an
         # absolute-nanosecond one (CI runners are noisy/shared machines).
+        #
+        # Even a same-run ratio isn't fully noise-proof on a single pass:
+        # message type 'D' has always had the narrowest margin of any type
+        # (79.9% of the 90% threshold even in the very first committed
+        # numbers), so a shared/loaded CI runner can occasionally push a
+        # single ./build/bench invocation's ratio over the line without any
+        # real regression. This applies the same "a process can only get
+        # slower from outside interference, never faster, so the best of a
+        # few passes recovers the true noise-robust estimate" reasoning
+        # bench/bench_threaded_main.cpp already uses for its own pass timing
+        # (see its run_path()) — up to 3 fresh ./build/bench runs, succeeding
+        # on the first that clears the budget, rather than loosening the
+        # threshold to paper over noise on one run.
+        #
         # Drift warnings (informational, never fail the build) need
         # bench/ci_history.csv to accumulate real numbers over time; that
         # part of bench/CI_INTEGRATION.md's recommendation (auto-commit
@@ -50,4 +61,98 @@ jobs:
         # since it requires granting the workflow push permissions — record
         # history manually (`python3 bench/check_budget.py record`) after a
         # performance-sensitive change instead, if desired.
-        run: python3 bench/check_budget.py check
+        run: |
+          for attempt in 1 2 3; do
+            echo "=== bench + budget check, attempt $attempt/3 ==="
+            ./build/bench
+            if python3 bench/check_budget.py check; then
+              exit 0
+            fi
+            echo "attempt $attempt failed the ratio budget; retrying if attempts remain"
+          done
+          echo "all 3 attempts failed the ratio budget — this is a real regression, not noise"
+          exit 1
+
+  sanitize:
+    name: sanitize (${{ matrix.sanitizer }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        sanitizer: [address-undefined, thread]
+    steps:
+      - uses: actions/checkout@v4
+
+      # A separate build directory per sanitizer, configured entirely through
+      # CMAKE_CXX_FLAGS/CMAKE_EXE_LINKER_FLAGS — CMakeLists.txt itself needs
+      # no sanitizer-specific logic, so the normal -Wall -Wextra -Wpedantic
+      # -Werror build stays exactly as clean as it is today.
+      - name: Configure (ASan + UBSan)
+        if: matrix.sanitizer == 'address-undefined'
+        run: |
+          cmake -B build-san -DCMAKE_BUILD_TYPE=RelWithDebInfo \
+            -DCMAKE_CXX_COMPILER=clang++ \
+            -DCMAKE_CXX_FLAGS="-fsanitize=address,undefined -fno-omit-frame-pointer" \
+            -DCMAKE_EXE_LINKER_FLAGS="-fsanitize=address,undefined"
+
+      - name: Configure (TSan)
+        if: matrix.sanitizer == 'thread'
+        run: |
+          cmake -B build-san -DCMAKE_BUILD_TYPE=RelWithDebInfo \
+            -DCMAKE_CXX_COMPILER=clang++ \
+            -DCMAKE_CXX_FLAGS="-fsanitize=thread -fno-omit-frame-pointer" \
+            -DCMAKE_EXE_LINKER_FLAGS="-fsanitize=thread"
+
+      # ASan+UBSan's ctest run below includes replay_selftest, which execs the
+      # real `replay` binary — so that job needs everything built, not just
+      # unit_tests. TSan only ever runs unit_tests directly (see below), so
+      # it skips instrumenting+linking the other binaries it'll never invoke.
+      - name: Build (all targets)
+        if: matrix.sanitizer == 'address-undefined'
+        run: cmake --build build-san --parallel
+
+      - name: Build unit_tests
+        if: matrix.sanitizer == 'thread'
+        run: cmake --build build-san --parallel --target unit_tests
+
+      # ASan+UBSan runs the WHOLE suite: memory errors and undefined behavior
+      # can hide in any code path (parser, book, exec, io), not just the
+      # concurrent ones, so there's no principled subset to skip here.
+      - name: Run full suite under ASan + UBSan
+        if: matrix.sanitizer == 'address-undefined'
+        run: ctest --test-dir build-san --output-on-failure
+
+      # TSan only checks concurrent code, and is expensive per-test — running
+      # it against ~90 single-threaded test cases that touch no shared state
+      # across threads would burn CI time without ever exercising what TSan
+      # exists to catch. Scoped to the [concurrency] tag: the SPSC queue's
+      # real cross-thread producer/consumer test, both threaded-pipeline
+      # correctness checks (test_replay_threaded.cpp, one instantiation per
+      # book type), and the multicast receiver's background-sender-thread
+      # test — every test in this codebase that actually spawns a second
+      # thread and shares state with it. This is exactly what closes the gap
+      # this project's own spsc_queue test comment named as the missing
+      # piece: acquire/release ordering reasoned about in comments, now
+      # actually checked by the tool built for it, not just argued in prose.
+      - name: Run [concurrency]-tagged tests under TSan
+        if: matrix.sanitizer == 'thread'
+        run: ./build-san/unit_tests "[concurrency]"
+
+  fuzz-smoke:
+    name: fuzz smoke test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # Bounded (60s) libFuzzer run against the ITCH parser through a real
+      # BookBuilder, on every push/PR — turning "we have a fuzzer" (previously
+      # true only if a human remembered to run fuzz/build_and_run.sh locally)
+      # into "our fuzzer runs continuously." A crash found here is a real bug,
+      # not noise the way a perf-ratio blip is — so unlike the benchmark
+      # budget above, this is a hard, unconditional fail with no retry.
+      # Linux-only: the system clang++ on ubuntu-latest already bundles
+      # libclang_rt.fuzzer, no extra toolchain setup needed (see
+      # fuzz/build_and_run.sh's macOS-only Homebrew-LLVM fallback, which
+      # this CI job doesn't need).
+      - name: Fuzz ITCH parser for 60s
+        run: fuzz/build_and_run.sh 60

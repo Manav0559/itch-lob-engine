@@ -59,7 +59,8 @@ struct Recorder {
 }  // namespace
 
 TEST_CASE("multicast_receiver receives a synthetic session byte-for-byte and "
-          "rebuilds the known-good book") {
+          "rebuilds the known-good book",
+          "[concurrency]") {
     const std::string group = "239.255.0.1";
     // A port distinct from the demo binaries' default (12345), so this test
     // never collides with someone manually running multicast_sender_main /

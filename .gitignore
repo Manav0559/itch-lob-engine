@@ -1,4 +1,5 @@
 build/
+build-*/
 *.gz
 *.NASDAQ_ITCH50
 *.itch

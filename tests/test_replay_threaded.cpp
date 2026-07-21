@@ -151,7 +151,7 @@ void check_same_book_state(const pipeline::BookBuilder<BookType>& single,
 }  // namespace
 
 TEMPLATE_TEST_CASE("threaded pipeline produces identical book state to the single-threaded path",
-                   "[book]", book::OrderBook, book::LadderBook) {
+                   "[book][concurrency]", book::OrderBook, book::LadderBook) {
     const std::vector<std::uint8_t> buf = synthetic_session();
 
     pipeline::BookBuilder<TestType> single;
@@ -163,8 +163,8 @@ TEMPLATE_TEST_CASE("threaded pipeline produces identical book state to the singl
     CHECK(single.unknown_refs == threaded.unknown_refs);
 }
 
-TEMPLATE_TEST_CASE("threaded pipeline preserves per-type frame counts", "[book]", book::OrderBook,
-                   book::LadderBook) {
+TEMPLATE_TEST_CASE("threaded pipeline preserves per-type frame counts", "[book][concurrency]",
+                   book::OrderBook, book::LadderBook) {
     const std::vector<std::uint8_t> buf = synthetic_session();
 
     pipeline::BookBuilder<TestType> single;

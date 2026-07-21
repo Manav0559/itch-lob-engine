@@ -99,7 +99,8 @@ TEST_CASE("size() reflects occupancy across pushes and pops") {
 // interleavings — `-fsanitize=thread` is the right tool to actually verify
 // the acquire/release pairing is race-free; that's a manual/CI check, not
 // something wired into this binary.
-TEST_CASE("concurrent producer/consumer preserves strict order under wraparound") {
+TEST_CASE("concurrent producer/consumer preserves strict order under wraparound",
+          "[concurrency]") {
     constexpr std::size_t kCapacity = 1024;
     constexpr int kCount = 5'000'000;
 
