@@ -115,6 +115,20 @@ cmake --build build --target bench && ./build/bench && python3 bench/plot.py
       (`LadderBook`-backed, the same default production now uses), not
       just decode-in-isolation — 4.6M+ executions across seed runs, clean, no
       crashes found so far; see [fuzz/README.md](fuzz/README.md)
+- [x] Live read-only query service (`replay_query`): a TCP JSON-lines server
+      (`include/net/query_server.hpp`) answering best bid/ask, depth, and
+      open-order-count questions per stock-locate while a replay runs —
+      `{"cmd":"list"}` / `{"cmd":"quote","locate":N}` in, one JSON object per
+      line out. The ingest side (parsing + book mutation) never talks to the
+      query server directly: it periodically publishes a plain-value
+      snapshot of the `BookTable` into a mutex-guarded `SnapshotStore`
+      (`include/pipeline/book_snapshot.hpp`), and every query thread reads
+      only that snapshot — the lock is held only for the snapshot handoff
+      itself (microseconds), never for a book mutation or for the O(symbol
+      count) walk that builds it, so the per-message hot path is completely
+      untouched. See `include/pipeline/book_snapshot.hpp`'s header comment
+      for the full concurrency-boundary rationale, and the "Other binaries"
+      section below for usage.
 - [x] Dependency-light static results dashboard (`dashboard/index.html`):
       client-side `fetch()` of the committed `bench/*.csv` files, hand-rolled
       inline-SVG charts (no Node/npm, no CDN, no build step) — OrderBook vs.
@@ -243,6 +257,52 @@ one-shot demo process rather than a persistent session server, only serves
 retransmission requests for a few seconds after sending before it exits.
 `live_replay` runs until interrupted (Ctrl-C / `SIGINT`) or a MoldUDP64
 end-of-session packet, since a live feed otherwise has no natural end.
+
+```bash
+./build/replay_query --selftest --port 12401 &
+printf '{"cmd":"list"}\n' | nc 127.0.0.1 12401
+printf '{"cmd":"quote","locate":1}\n' | nc 127.0.0.1 12401
+```
+
+`replay_query` runs the same single-threaded replay as `replay` (same
+`<file>` / `--legacy <file>` / `--selftest` / `--map` arguments), plus a
+live, read-only TCP JSON-lines query server answering best bid/ask, depth,
+and open-order-count questions per stock-locate — this is the one binary in
+the repo with a request/response API surface rather than raw ingest/CLI
+output. One JSON object per line in, one back:
+
+```
+{"cmd":"list"}                    -> every locate currently known
+{"cmd":"quote","locate":1}        -> best bid/ask, depth, open orders for locate 1
+```
+
+```json
+{"locate":1,"best_bid":null,"best_bid_shares":null,"best_ask":1500100,
+ "best_ask_shares":400,"open_orders":1,"bid_levels":0,"ask_levels":1,
+ "snapshot_version":1}
+```
+
+`best_bid`/`best_ask` are `null` (not `0`) when that side of the book is
+empty, and `snapshot_version` counts how many times the query server's data
+has been refreshed from the live book, so a caller can tell "no data yet"
+apart from "data as of refresh #N." Additional flags: `--port N` (default
+12401; `0` picks a free port, printed once bound), `--publish-every N`
+(refresh the query server's data every N book-touching messages, default
+2000), `--pace-us N` (sleep after each refresh — slows a small/`--selftest`
+replay down enough to demo live querying against it), `--serve-seconds N`
+(keep serving N seconds after replay finishes, then exit — default 0 serves
+until Ctrl-C, same convention as `live_replay`).
+
+By design this is a read-only diagnostic surface, not a general-purpose
+service: no authentication, binds loopback-only, and `include/net/
+query_server.hpp`'s request parser is a narrow hand-rolled scanner over this
+one fixed schema, not a spec-compliant JSON parser (documented in that
+file's header comment, the same way `include/net/multicast_receiver.hpp`
+documents `MoldUdp64Receiver`'s simplifications versus the full MoldUDP64
+spec). The concurrency boundary that makes this safe — the ingest side never
+blocks on, or races with, a query thread, and neither ever touches a book
+mutation lock — is `include/pipeline/book_snapshot.hpp`'s `SnapshotStore`;
+see its header comment for the full design.
 
 ## License
 
