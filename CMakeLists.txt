@@ -55,6 +55,16 @@ add_executable(multicast_sender src/multicast_sender_main.cpp)
 target_link_libraries(multicast_sender PRIVATE itch)
 target_compile_options(multicast_sender PRIVATE ${PROJECT_WARNINGS})
 
+# Same single-threaded replay as `replay`, plus a live, read-only TCP
+# JSON-lines query server (include/net/query_server.hpp) answering best
+# bid/ask, depth, and open-order-count questions per stock-locate while the
+# replay runs — see include/pipeline/book_snapshot.hpp for the mutex-guarded
+# ingest-thread/query-thread handoff that keeps this off the per-message hot
+# path.
+add_executable(replay_query src/replay_query_main.cpp)
+target_link_libraries(replay_query PRIVATE itch ZLIB::ZLIB Threads::Threads)
+target_compile_options(replay_query PRIVATE ${PROJECT_WARNINGS})
+
 # OrderBook vs LadderBook latency harness (see bench/README.md). Not part of
 # `ctest` — it's a manual-run benchmark, not a correctness check — but it
 # builds under the same warning-as-error bar as everything else.
@@ -96,6 +106,8 @@ add_executable(unit_tests
   tests/test_moldudp64.cpp
   tests/test_risk_gate.cpp
   tests/test_thread_affinity.cpp
+  tests/test_book_snapshot.cpp
+  tests/test_query_server.cpp
 )
 target_link_libraries(unit_tests PRIVATE itch exec ZLIB::ZLIB Threads::Threads
                                           Catch2::Catch2WithMain)
@@ -108,3 +120,9 @@ catch_discover_tests(unit_tests)
 
 # The replay binary must always work end-to-end without a data file.
 add_test(NAME replay_selftest COMMAND replay --selftest)
+
+# replay_query must also work end-to-end without a data file — --serve-seconds
+# 1 bounds the "serve after replay finishes" phase so this exits on its own
+# instead of running until Ctrl-C, the way plain `replay_query --selftest`
+# (a manual/demo invocation, not this test) does by default.
+add_test(NAME replay_query_selftest COMMAND replay_query --selftest --serve-seconds 1)
