@@ -1,0 +1,755 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>itch-lob-engine — bench dashboard</title>
+<style>
+  :root {
+    color-scheme: light;
+    --page:           #f9f9f7;
+    --surface-1:      #fcfcfb;
+    --surface-2:      #f3f2ef;
+    --text-primary:   #0b0b0b;
+    --text-secondary: #52514e;
+    --text-muted:     #898781;
+    --grid:           #e1e0d9;
+    --baseline:       #c3c2b7;
+    --border:         rgba(11,11,11,0.10);
+    --series-1:       #2a78d6; /* blue   */
+    --series-2:       #eb6834; /* orange */
+    --series-3:       #1baf7a; /* aqua   */
+    --good:           #0ca30c;
+    --critical:       #d03b3b;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      color-scheme: dark;
+      --page:           #0d0d0d;
+      --surface-1:      #1a1a19;
+      --surface-2:      #202020;
+      --text-primary:   #ffffff;
+      --text-secondary: #c3c2b7;
+      --text-muted:     #898781;
+      --grid:           #2c2c2a;
+      --baseline:       #383835;
+      --border:         rgba(255,255,255,0.10);
+      --series-1:       #3987e5;
+      --series-2:       #d95926;
+      --series-3:       #199e70;
+      --good:           #0ca30c;
+      --critical:       #e66767;
+    }
+  }
+  :root[data-theme="dark"] {
+    color-scheme: dark;
+    --page:           #0d0d0d;
+    --surface-1:      #1a1a19;
+    --surface-2:      #202020;
+    --text-primary:   #ffffff;
+    --text-secondary: #c3c2b7;
+    --text-muted:     #898781;
+    --grid:           #2c2c2a;
+    --baseline:       #383835;
+    --border:         rgba(255,255,255,0.10);
+    --series-1:       #3987e5;
+    --series-2:       #d95926;
+    --series-3:       #199e70;
+    --good:           #0ca30c;
+    --critical:       #e66767;
+  }
+
+  * { box-sizing: border-box; }
+  html, body {
+    margin: 0; padding: 0;
+    background: var(--page);
+    color: var(--text-primary);
+    font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+  }
+  body { padding: 24px 20px 64px; }
+  .wrap { max-width: 1180px; margin: 0 auto; }
+
+  header.page { display: flex; justify-content: space-between; align-items: flex-start; gap: 16px; margin-bottom: 6px; flex-wrap: wrap; }
+  h1 { font-size: 22px; margin: 0 0 4px; letter-spacing: -0.01em; }
+  .sub { color: var(--text-secondary); font-size: 13.5px; margin: 0; max-width: 72ch; line-height: 1.5; }
+  code { background: var(--surface-2); border: 1px solid var(--border); border-radius: 4px; padding: 1px 5px; font-size: 0.92em; }
+
+  .theme-toggle {
+    border: 1px solid var(--border); background: var(--surface-1); color: var(--text-secondary);
+    border-radius: 999px; padding: 6px 12px; font-size: 12.5px; cursor: pointer; white-space: nowrap;
+  }
+  .theme-toggle:hover { color: var(--text-primary); }
+
+  .banner {
+    display: none;
+    margin: 16px 0; padding: 12px 16px; border-radius: 8px;
+    background: var(--surface-2); border: 1px solid var(--border);
+    color: var(--text-secondary); font-size: 13px; line-height: 1.55;
+  }
+  .banner.show { display: block; }
+  .banner strong { color: var(--text-primary); }
+
+  .stat-row { display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); gap: 12px; margin: 20px 0 8px; }
+  .stat-tile {
+    background: var(--surface-1); border: 1px solid var(--border); border-radius: 10px;
+    padding: 14px 16px;
+  }
+  .stat-tile .label { font-size: 11.5px; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.04em; margin-bottom: 6px; }
+  .stat-tile .value { font-size: 26px; font-weight: 600; line-height: 1.15; }
+  .stat-tile .value .unit { font-size: 14px; font-weight: 500; color: var(--text-secondary); margin-left: 3px; }
+  .stat-tile .note { font-size: 12px; color: var(--text-muted); margin-top: 4px; }
+
+  section.panel {
+    background: var(--surface-1); border: 1px solid var(--border); border-radius: 12px;
+    padding: 20px 22px 22px; margin-top: 22px;
+  }
+  section.panel h2 { font-size: 16px; margin: 0 0 2px; }
+  section.panel .desc { font-size: 12.5px; color: var(--text-secondary); margin: 0 0 16px; line-height: 1.5; max-width: 90ch; }
+
+  .chart-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 18px; }
+  @media (max-width: 900px) { .chart-grid { grid-template-columns: 1fr; } }
+  .chart-grid.two { grid-template-columns: repeat(2, 1fr); }
+
+  .chart-card { min-width: 0; }
+  .chart-card h3 { font-size: 13px; font-weight: 600; margin: 0 0 8px; color: var(--text-primary); }
+  .chart-card svg { width: 100%; height: auto; display: block; overflow: visible; }
+
+  .legend { display: flex; flex-wrap: wrap; gap: 14px; margin: 10px 2px 0; font-size: 12px; color: var(--text-secondary); }
+  .legend .item { display: flex; align-items: center; gap: 6px; }
+  .legend .swatch { width: 10px; height: 10px; border-radius: 2px; flex: none; }
+
+  .bar-rect { transition: opacity 0.1s ease; }
+  .bar-rect:hover { opacity: 0.78; }
+
+  .tooltip {
+    position: fixed; pointer-events: none; z-index: 50;
+    background: var(--text-primary); color: var(--page);
+    font-size: 11.5px; line-height: 1.45; padding: 6px 9px; border-radius: 6px;
+    max-width: 220px; opacity: 0; transform: translate(-50%, -100%);
+    transition: opacity 0.08s ease; white-space: nowrap;
+  }
+  .tooltip.show { opacity: 0.96; }
+  .tooltip b { font-weight: 700; }
+
+  .axis-tick text, .msg-tick text { fill: var(--text-muted); font-size: 10.5px; }
+  .gridline { stroke: var(--grid); stroke-width: 1; }
+  .baseline-axis { stroke: var(--baseline); stroke-width: 1; }
+  .threshold-line { stroke: var(--critical); stroke-width: 1.5; stroke-dasharray: 4 3; }
+
+  table.data-table { width: 100%; border-collapse: collapse; font-size: 12.5px; }
+  table.data-table th, table.data-table td {
+    text-align: right; padding: 7px 10px; border-bottom: 1px solid var(--border);
+    font-variant-numeric: tabular-nums;
+  }
+  table.data-table th:first-child, table.data-table td:first-child { text-align: left; font-variant-numeric: normal; }
+  table.data-table th { color: var(--text-muted); font-weight: 600; font-size: 11px; text-transform: uppercase; letter-spacing: 0.03em; }
+  table.data-table tbody tr:last-child td { border-bottom: none; }
+
+  .empty-state {
+    padding: 28px 20px; text-align: center; color: var(--text-muted); font-size: 13px;
+    border: 1px dashed var(--border); border-radius: 10px; background: var(--surface-2);
+  }
+  .empty-state .big { font-size: 26px; margin-bottom: 6px; }
+
+  footer.page { margin-top: 30px; padding-top: 16px; border-top: 1px solid var(--border); color: var(--text-muted); font-size: 12px; line-height: 1.6; }
+  footer.page a { color: inherit; }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <header class="page">
+    <div>
+      <h1>itch-lob-engine — bench dashboard</h1>
+      <p class="sub">
+        Renders <code>bench/results.csv</code>, <code>bench/results_threaded.csv</code> and
+        <code>bench/ci_history.csv</code> directly, client-side, with no build step.
+        Regenerate the source data with <code>cmake --build build --target bench &amp;&amp; ./build/bench</code>
+        (and <code>./build/bench_threaded</code> for the threaded numbers), then reload this page.
+      </p>
+    </div>
+    <button class="theme-toggle" id="themeToggle" type="button">Toggle theme</button>
+  </header>
+
+  <div class="banner" id="fetchBanner"></div>
+
+  <div class="stat-row" id="statRow"></div>
+
+  <section class="panel">
+    <h2>OrderBook vs LadderBook — per-message latency</h2>
+    <p class="desc">
+      p50 / p99 / p99.9 nanoseconds per message type, from a fixed-seed 2.2M-message synthetic
+      session (one discarded warm-up pass + 3 measured passes). Each panel has its own axis —
+      p50 and p99.9 differ by roughly two orders of magnitude, so a shared scale would flatten
+      the smaller values to nothing.
+    </p>
+    <div class="chart-grid" id="latencyCharts"></div>
+    <div class="legend" id="latencyLegend"></div>
+  </section>
+
+  <section class="panel">
+    <h2>Threaded vs single-threaded throughput</h2>
+    <p class="desc">
+      End-to-end messages/sec for the same 2.2M-message session across three replay paths —
+      median and best-of-3 across measured passes. See
+      <code>bench/THREADED_PIPELINE_FINDINGS.md</code> for the full discussion of why decoupling
+      parsing from book-building doesn't reliably win once <code>LadderBook</code> makes book
+      mutation this cheap.
+    </p>
+    <div class="chart-grid two">
+      <div class="chart-card">
+        <h3>Messages / sec by replay path</h3>
+        <div id="throughputChart"></div>
+        <div class="legend" id="throughputLegend"></div>
+      </div>
+      <div class="chart-card">
+        <h3>SPSC queue round-trip latency (ns)</h3>
+        <div id="spscTable"></div>
+      </div>
+    </div>
+  </section>
+
+  <section class="panel">
+    <h2>CI performance ratio over commits</h2>
+    <p class="desc">
+      <code>LadderBook</code> p50 ÷ <code>OrderBook</code> p50, averaged across message types,
+      per commit recorded to <code>main</code> by <code>bench/check_budget.py record</code>.
+      Lower is better (LadderBook further ahead of OrderBook); the dashed line marks the CI hard-fail
+      threshold of 0.90 from <code>bench/BUDGET.md</code>. Faceted by OS, since Linux and macOS
+      runners have different absolute performance profiles.
+    </p>
+    <div id="ciSection"></div>
+  </section>
+
+  <footer class="page">
+    Data source: static CSVs committed under <code>bench/</code> — this page performs no
+    computation the repo doesn't already do, it only parses and charts what's there. See
+    <code>dashboard/README.md</code> for how to serve this page locally.
+  </footer>
+
+</div>
+
+<div class="tooltip" id="tooltip"></div>
+
+<script>
+(function () {
+  "use strict";
+
+  // ---------- theme toggle ----------
+  var root = document.documentElement;
+  var toggle = document.getElementById("themeToggle");
+  var saved = localStorage.getItem("dashboard-theme");
+  if (saved) root.setAttribute("data-theme", saved);
+  toggle.addEventListener("click", function () {
+    var current = root.getAttribute("data-theme");
+    var prefersDark = window.matchMedia && window.matchMedia("(prefers-color-scheme: dark)").matches;
+    var effectiveDark = current ? current === "dark" : prefersDark;
+    var next = effectiveDark ? "light" : "dark";
+    root.setAttribute("data-theme", next);
+    localStorage.setItem("dashboard-theme", next);
+  });
+
+  // ---------- tiny CSV parser (no quoted commas in these files) ----------
+  function parseCSV(text) {
+    var lines = text.replace(/\r\n/g, "\n").split("\n").filter(function (l) { return l.trim().length > 0; });
+    if (lines.length === 0) return { header: [], rows: [] };
+    var header = lines[0].split(",");
+    var rows = lines.slice(1).map(function (line) {
+      var cells = line.split(",");
+      var obj = {};
+      header.forEach(function (h, i) { obj[h] = cells[i]; });
+      return obj;
+    });
+    return { header: header, rows: rows };
+  }
+
+  function fetchCSV(path) {
+    return fetch(path).then(function (resp) {
+      if (!resp.ok) throw new Error(path + " -> HTTP " + resp.status);
+      return resp.text();
+    }).then(parseCSV);
+  }
+
+  function num(v) { var n = parseFloat(v); return isNaN(n) ? 0 : n; }
+  function fmtInt(n) { return Math.round(n).toLocaleString("en-US"); }
+  function fmtCompact(n) {
+    if (n >= 1e6) return (n / 1e6).toFixed(2) + "M";
+    if (n >= 1e3) return (n / 1e3).toFixed(1) + "K";
+    return fmtInt(n);
+  }
+
+  var tooltip = document.getElementById("tooltip");
+  function showTooltip(evt, html) {
+    tooltip.innerHTML = html;
+    tooltip.classList.add("show");
+    moveTooltip(evt);
+  }
+  function moveTooltip(evt) {
+    tooltip.style.left = evt.clientX + "px";
+    tooltip.style.top = (evt.clientY - 10) + "px";
+  }
+  function hideTooltip() { tooltip.classList.remove("show"); }
+
+  var SVGNS = "http://www.w3.org/2000/svg";
+  function svgEl(tag, attrs) {
+    var el = document.createElementNS(SVGNS, tag);
+    for (var k in attrs) el.setAttribute(k, attrs[k]);
+    return el;
+  }
+
+  function niceTicks(maxVal, count) {
+    if (maxVal <= 0) return [0, 1];
+    var rough = maxVal / count;
+    var mag = Math.pow(10, Math.floor(Math.log10(rough)));
+    var norm = rough / mag;
+    var step;
+    if (norm < 1.5) step = 1 * mag;
+    else if (norm < 3) step = 2 * mag;
+    else if (norm < 7) step = 5 * mag;
+    else step = 10 * mag;
+    var ticks = [];
+    var t = 0;
+    while (t < maxVal + step) { ticks.push(t); t += step; }
+    return ticks;
+  }
+
+  // ---------- grouped bar chart ----------
+  // categories: array of x-axis group labels
+  // series: array of {name, color, values: [per category]}
+  function groupedBarChart(container, opts) {
+    var categories = opts.categories, series = opts.series;
+    var categoryLabels = opts.categoryLabels || categories;
+    var unit = opts.unit || "";
+    var width = opts.width || 340, height = opts.height || 240;
+    var margin = { top: 10, right: 12, bottom: 26, left: 46 };
+    var plotW = width - margin.left - margin.right;
+    var plotH = height - margin.top - margin.bottom;
+
+    var maxVal = 0;
+    series.forEach(function (s) { s.values.forEach(function (v) { if (v > maxVal) maxVal = v; }); });
+    var ticks = niceTicks(maxVal, 4);
+    var axisMax = ticks[ticks.length - 1] || 1;
+
+    function y(v) { return margin.top + plotH - (v / axisMax) * plotH; }
+
+    var svg = svgEl("svg", { viewBox: "0 0 " + width + " " + height, role: "img" });
+
+    // gridlines + y ticks
+    ticks.forEach(function (t) {
+      var yy = y(t);
+      svg.appendChild(svgEl("line", { class: "gridline", x1: margin.left, x2: width - margin.right, y1: yy, y2: yy }));
+      var label = svgEl("text", { class: "axis-tick", x: margin.left - 8, y: yy + 3, "text-anchor": "end" });
+      label.textContent = fmtCompact(t);
+      svg.appendChild(label);
+    });
+    // baseline
+    svg.appendChild(svgEl("line", { class: "baseline-axis", x1: margin.left, x2: width - margin.right, y1: margin.top + plotH, y2: margin.top + plotH }));
+
+    var groupW = plotW / categories.length;
+    var nSeries = series.length;
+    var barGap = 2;
+    var groupPad = groupW * 0.16;
+    var barW = Math.min(24, (groupW - groupPad * 2 - barGap * (nSeries - 1)) / nSeries);
+
+    categories.forEach(function (cat, ci) {
+      var groupX0 = margin.left + ci * groupW;
+      series.forEach(function (s, si) {
+        var v = s.values[ci];
+        var barsTotalW = nSeries * barW + (nSeries - 1) * barGap;
+        var startX = groupX0 + (groupW - barsTotalW) / 2;
+        var x = startX + si * (barW + barGap);
+        var yTop = y(v);
+        var h = margin.top + plotH - yTop;
+        if (h < 0) h = 0;
+        var r = Math.min(4, barW / 2, h);
+        var rect = svgEl("path", {
+          class: "bar-rect",
+          d: roundedTopRectPath(x, yTop, barW, h, r),
+          fill: s.color
+        });
+        rect.addEventListener("mousemove", function (evt) {
+          showTooltip(evt, "<b>" + s.name + "</b> — " + categoryLabels[ci] + "<br>" + fmtInt(v) + " " + unit);
+        });
+        rect.addEventListener("mouseleave", hideTooltip);
+        svg.appendChild(rect);
+      });
+      var tickLabel = svgEl("text", { class: "msg-tick", x: groupX0 + groupW / 2, y: margin.top + plotH + 16, "text-anchor": "middle" });
+      tickLabel.textContent = cat;
+      svg.appendChild(tickLabel);
+    });
+
+    container.appendChild(svg);
+  }
+
+  function roundedTopRectPath(x, y, w, h, r) {
+    if (h <= 0) return "M" + x + " " + (y + h) + " h" + w + " v0 h" + (-w) + " Z";
+    r = Math.max(0, Math.min(r, w / 2, h));
+    return [
+      "M", x, y + h,
+      "L", x, y + r,
+      "Q", x, y, x + r, y,
+      "L", x + w - r, y,
+      "Q", x + w, y, x + w, y + r,
+      "L", x + w, y + h,
+      "Z"
+    ].join(" ");
+  }
+
+  function legendFor(container, series) {
+    container.innerHTML = "";
+    series.forEach(function (s) {
+      var item = document.createElement("div");
+      item.className = "item";
+      var sw = document.createElement("span");
+      sw.className = "swatch";
+      sw.style.background = s.color;
+      item.appendChild(sw);
+      var label = document.createElement("span");
+      label.textContent = s.name;
+      item.appendChild(label);
+      container.appendChild(item);
+    });
+  }
+
+  // ---------- line chart (for CI ratio) ----------
+  function lineChart(container, opts) {
+    var points = opts.points; // [{x label, y}]
+    var width = opts.width || 1080, height = opts.height || 220;
+    var margin = { top: 16, right: 16, bottom: 30, left: 46 };
+    var plotW = width - margin.left - margin.right;
+    var plotH = height - margin.top - margin.bottom;
+
+    var vals = points.map(function (p) { return p.y; });
+    var minVal = Math.min.apply(null, vals.concat([opts.threshold || 1]));
+    var maxVal = Math.max.apply(null, vals.concat([opts.threshold || 0]));
+    var pad = (maxVal - minVal) * 0.15 || 0.05;
+    minVal = Math.max(0, minVal - pad);
+    maxVal = maxVal + pad;
+
+    function x(i) { return points.length <= 1 ? margin.left + plotW / 2 : margin.left + (i / (points.length - 1)) * plotW; }
+    function y(v) { return margin.top + plotH - ((v - minVal) / (maxVal - minVal)) * plotH; }
+
+    var svg = svgEl("svg", { viewBox: "0 0 " + width + " " + height });
+
+    var ticks = niceTicks(maxVal, 4).filter(function (t) { return t >= minVal; });
+    ticks.forEach(function (t) {
+      var yy = y(t);
+      svg.appendChild(svgEl("line", { class: "gridline", x1: margin.left, x2: width - margin.right, y1: yy, y2: yy }));
+      var label = svgEl("text", { class: "axis-tick", x: margin.left - 8, y: yy + 3, "text-anchor": "end" });
+      label.textContent = t.toFixed(2);
+      svg.appendChild(label);
+    });
+    svg.appendChild(svgEl("line", { class: "baseline-axis", x1: margin.left, x2: width - margin.right, y1: margin.top + plotH, y2: margin.top + plotH }));
+
+    if (opts.threshold != null) {
+      var ty = y(opts.threshold);
+      svg.appendChild(svgEl("line", { class: "threshold-line", x1: margin.left, x2: width - margin.right, y1: ty, y2: ty }));
+      var tlabel = svgEl("text", { class: "axis-tick", x: width - margin.right, y: ty - 4, "text-anchor": "end" });
+      tlabel.textContent = "budget 0.90";
+      tlabel.style.fill = "var(--critical)";
+      svg.appendChild(tlabel);
+    }
+
+    var pathD = points.map(function (p, i) { return (i === 0 ? "M" : "L") + x(i) + " " + y(p.y); }).join(" ");
+    svg.appendChild(svgEl("path", { d: pathD, fill: "none", stroke: "var(--series-1)", "stroke-width": 2, "stroke-linejoin": "round", "stroke-linecap": "round" }));
+
+    points.forEach(function (p, i) {
+      var cx = x(i), cy = y(p.y);
+      var dot = svgEl("circle", { cx: cx, cy: cy, r: 5, fill: "var(--series-1)", stroke: "var(--surface-1)", "stroke-width": 2 });
+      dot.addEventListener("mousemove", function (evt) {
+        showTooltip(evt, "<b>" + p.x + "</b><br>ratio " + p.y.toFixed(3));
+      });
+      dot.addEventListener("mouseleave", hideTooltip);
+      svg.appendChild(dot);
+
+      if (points.length <= 20 || i === 0 || i === points.length - 1 || i % Math.ceil(points.length / 12) === 0) {
+        var lbl = svgEl("text", { class: "msg-tick", x: cx, y: margin.top + plotH + 16, "text-anchor": "middle" });
+        lbl.textContent = p.x;
+        svg.appendChild(lbl);
+      }
+    });
+
+    container.appendChild(svg);
+  }
+
+  document.addEventListener("mousemove", moveTooltip);
+
+  // ---------- banner for fetch problems ----------
+  function showBanner(html) {
+    var b = document.getElementById("fetchBanner");
+    b.innerHTML = html;
+    b.classList.add("show");
+  }
+
+  if (location.protocol === "file:") {
+    showBanner(
+      "<strong>This page needs to be served over HTTP, not opened as a file.</strong><br>" +
+      "Browsers block <code>fetch()</code> against <code>file://</code> URLs. From the repo root, run " +
+      "<code>python3 -m http.server</code> and open <code>http://localhost:8000/dashboard/</code> instead. " +
+      "See <code>dashboard/README.md</code>."
+    );
+  }
+
+  var MSG_TYPES = ["A", "E", "C", "X", "D", "U"];
+  var MSG_NAMES = { A: "Add", E: "Execute", C: "Execute(px)", X: "Cancel", D: "Delete", U: "Replace" };
+
+  // ============ Section 1: results.csv ============
+  fetchCSV("../bench/results.csv").then(function (data) {
+    var rows = data.rows;
+    if (rows.length === 0) throw new Error("bench/results.csv is empty");
+
+    var byBook = {};
+    rows.forEach(function (r) {
+      byBook[r.book_type] = byBook[r.book_type] || {};
+      byBook[r.book_type][r.message_type] = r;
+    });
+    var bookTypes = Object.keys(byBook).sort(); // LadderBook, OrderBook -> want OrderBook first
+    bookTypes.sort(function (a) { return a === "OrderBook" ? -1 : 1; });
+
+    var colorFor = { OrderBook: "var(--series-1)", LadderBook: "var(--series-2)" };
+    var percentiles = [
+      { key: "p50_ns", label: "p50" },
+      { key: "p99_ns", label: "p99" },
+      { key: "p999_ns", label: "p99.9" }
+    ];
+
+    var chartsContainer = document.getElementById("latencyCharts");
+    percentiles.forEach(function (pct) {
+      var card = document.createElement("div");
+      card.className = "chart-card";
+      var h3 = document.createElement("h3");
+      h3.textContent = pct.label + " latency (ns)";
+      card.appendChild(h3);
+      chartsContainer.appendChild(card);
+
+      var series = bookTypes.map(function (bt) {
+        return {
+          name: bt,
+          color: colorFor[bt] || "var(--series-3)",
+          values: MSG_TYPES.map(function (mt) {
+            var row = byBook[bt] && byBook[bt][mt];
+            return row ? num(row[pct.key]) : 0;
+          })
+        };
+      });
+      groupedBarChart(card, {
+        categories: MSG_TYPES,
+        categoryLabels: MSG_TYPES.map(function (mt) { return MSG_NAMES[mt] || mt; }),
+        series: series,
+        unit: "ns",
+        width: 340,
+        height: 230
+      });
+    });
+
+    legendFor(document.getElementById("latencyLegend"), bookTypes.map(function (bt) {
+      return { name: bt, color: colorFor[bt] || "var(--series-3)" };
+    }));
+
+    var codeKey = document.createElement("div");
+    codeKey.className = "legend";
+    codeKey.style.marginTop = "2px";
+    codeKey.innerHTML = MSG_TYPES.map(function (mt) {
+      return "<span><b style=\"color:var(--text-primary)\">" + mt + "</b> = " + MSG_NAMES[mt] + "</span>";
+    }).join(" &nbsp;·&nbsp; ");
+    document.getElementById("latencyLegend").insertAdjacentElement("afterend", codeKey);
+
+    // headline stats: Add p50 speedup + overall mean p50 ratio
+    var addOrder = byBook.OrderBook && byBook.OrderBook.A;
+    var addLadder = byBook.LadderBook && byBook.LadderBook.A;
+    var stats = [];
+    if (addOrder && addLadder) {
+      var speedup = num(addOrder.p50_ns) / num(addLadder.p50_ns);
+      stats.push({
+        label: "LadderBook speedup — Add p50",
+        value: speedup.toFixed(2) + "×",
+        note: fmtInt(addOrder.p50_ns) + " ns → " + fmtInt(addLadder.p50_ns) + " ns"
+      });
+    }
+    if (byBook.OrderBook && byBook.LadderBook) {
+      var ratios = MSG_TYPES.map(function (mt) {
+        var o = byBook.OrderBook[mt], l = byBook.LadderBook[mt];
+        return (o && l) ? num(l.p50_ns) / num(o.p50_ns) : null;
+      }).filter(function (v) { return v != null; });
+      var meanRatio = ratios.reduce(function (a, b) { return a + b; }, 0) / ratios.length;
+      stats.push({
+        label: "Mean LadderBook/OrderBook p50 ratio",
+        value: meanRatio.toFixed(2),
+        note: "lower = LadderBook further ahead · CI budget fails above 0.90"
+      });
+    }
+    addStatTiles(stats);
+  }).catch(function (err) {
+    document.getElementById("latencyCharts").innerHTML = emptyStateHTML("No latency data", err.message);
+    console.error(err);
+  });
+
+  // ============ Section 2: results_threaded.csv ============
+  fetchCSV("../bench/results_threaded.csv").then(function (data) {
+    var rows = data.rows;
+    var throughput = rows.filter(function (r) { return r.metric === "throughput"; });
+    var spsc = rows.filter(function (r) { return r.metric === "spsc_roundtrip"; });
+
+    if (throughput.length > 0) {
+      var pathLabels = { single_threaded: "Single-threaded", threaded_pipeline: "Threaded", threaded_pinned: "Threaded (pinned)" };
+      var pathColors = { single_threaded: "var(--series-1)", threaded_pipeline: "var(--series-2)", threaded_pinned: "var(--series-3)" };
+      var order = ["single_threaded", "threaded_pipeline", "threaded_pinned"].filter(function (p) {
+        return throughput.some(function (r) { return r.path === p; });
+      });
+
+      var series = [
+        { name: "Median msgs/sec", color: "var(--series-1)", values: [] },
+        { name: "Best-of-3 msgs/sec", color: "var(--series-2)", values: [] }
+      ];
+      order.forEach(function (p) {
+        var row = throughput.find(function (r) { return r.path === p; });
+        series[0].values.push(row ? num(row.messages_per_sec) : 0);
+        series[1].values.push(row ? num(row.best_msgs_per_sec) : 0);
+      });
+
+      var chartDiv = document.getElementById("throughputChart");
+      groupedBarChart(chartDiv, {
+        categories: order.map(function (p) { return pathLabels[p] || p; }),
+        series: series,
+        unit: "msgs/sec",
+        width: 460,
+        height: 260
+      });
+      legendFor(document.getElementById("throughputLegend"), series);
+
+      // headline stat: best path ratio vs single-threaded
+      var single = throughput.find(function (r) { return r.path === "single_threaded"; });
+      var pinned = throughput.find(function (r) { return r.path === "threaded_pinned"; });
+      var pipeline = throughput.find(function (r) { return r.path === "threaded_pipeline"; });
+      if (single) {
+        var best = [pinned, pipeline].filter(Boolean).sort(function (a, b) { return num(b.best_msgs_per_sec) - num(a.best_msgs_per_sec); })[0];
+        if (best) {
+          var ratio = num(best.best_msgs_per_sec) / num(single.best_msgs_per_sec);
+          addStatTiles([{
+            label: "Best threaded/single-threaded (best-of-3)",
+            value: ratio.toFixed(2) + "×",
+            note: fmtCompact(num(single.best_msgs_per_sec)) + " → " + fmtCompact(num(best.best_msgs_per_sec)) + " msgs/sec"
+          }]);
+        }
+      }
+    } else {
+      document.getElementById("throughputChart").innerHTML = emptyStateHTML("No throughput data", "bench/results_threaded.csv has no throughput rows.");
+    }
+
+    var spscDiv = document.getElementById("spscTable");
+    if (spsc.length > 0) {
+      var table = document.createElement("table");
+      table.className = "data-table";
+      table.innerHTML =
+        "<thead><tr><th>Path</th><th>p50</th><th>p99</th><th>p99.9</th><th>min</th></tr></thead>";
+      var tbody = document.createElement("tbody");
+      spsc.forEach(function (r) {
+        var tr = document.createElement("tr");
+        var label = r.path.replace("envelope_roundtrip_", "").replace(/_/g, " ");
+        tr.innerHTML =
+          "<td>" + label + "</td>" +
+          "<td>" + fmtInt(r.p50_ns) + "</td>" +
+          "<td>" + fmtInt(r.p99_ns) + "</td>" +
+          "<td>" + fmtInt(r.p999_ns) + "</td>" +
+          "<td>" + fmtInt(r.min_ns) + "</td>";
+        tbody.appendChild(tr);
+      });
+      table.appendChild(tbody);
+      spscDiv.appendChild(table);
+    } else {
+      spscDiv.innerHTML = emptyStateHTML("No SPSC data", "No spsc_roundtrip rows found.");
+    }
+  }).catch(function (err) {
+    document.getElementById("throughputChart").innerHTML = emptyStateHTML("Couldn't load throughput data", err.message);
+    document.getElementById("spscTable").innerHTML = "";
+    console.error(err);
+  });
+
+  // ============ Section 3: ci_history.csv ============
+  fetchCSV("../bench/ci_history.csv").then(function (data) {
+    var rows = data.rows;
+    var ciSection = document.getElementById("ciSection");
+
+    if (rows.length === 0) {
+      ciSection.innerHTML = emptyStateHTML(
+        "No CI history yet",
+        "bench/ci_history.csv exists but has no recorded runs. It's populated by " +
+        "<code>python3 bench/check_budget.py record</code> on pushes to main (see " +
+        "bench/CI_INTEGRATION.md) — once that's wired into the workflow and a few commits " +
+        "land, this section will chart the LadderBook/OrderBook ratio over time automatically, " +
+        "no changes needed here."
+      );
+      return;
+    }
+
+    // group by os -> commit_sha (in file order = chronological) -> mean p50 ratio across message types
+    var byOs = {};
+    var commitOrder = {}; // os -> [sha in first-seen order]
+    rows.forEach(function (r) {
+      byOs[r.os] = byOs[r.os] || {};
+      commitOrder[r.os] = commitOrder[r.os] || [];
+      var sha = r.commit_sha;
+      if (!byOs[r.os][sha]) {
+        byOs[r.os][sha] = { OrderBook: {}, LadderBook: {} };
+        commitOrder[r.os].push(sha);
+      }
+      byOs[r.os][sha][r.book_type][r.message_type] = num(r.p50_ns);
+    });
+
+    Object.keys(byOs).forEach(function (os) {
+      var card = document.createElement("div");
+      card.className = "chart-card";
+      card.style.marginBottom = "18px";
+      var h3 = document.createElement("h3");
+      h3.textContent = os;
+      card.appendChild(h3);
+
+      var points = commitOrder[os].map(function (sha) {
+        var entry = byOs[os][sha];
+        var ratios = MSG_TYPES.map(function (mt) {
+          var o = entry.OrderBook[mt], l = entry.LadderBook[mt];
+          return (o && l) ? l / o : null;
+        }).filter(function (v) { return v != null; });
+        var mean = ratios.length ? ratios.reduce(function (a, b) { return a + b; }, 0) / ratios.length : null;
+        return { x: sha.slice(0, 7), y: mean };
+      }).filter(function (p) { return p.y != null; });
+
+      if (points.length === 0) {
+        card.appendChild(fragmentFromHTML(emptyStateHTML("No comparable rows", "Need both OrderBook and LadderBook rows for the same commit.")));
+      } else {
+        lineChart(card, { points: points, threshold: 0.90, width: 1080, height: 220 });
+      }
+      ciSection.appendChild(card);
+    });
+  }).catch(function (err) {
+    document.getElementById("ciSection").innerHTML = emptyStateHTML("Couldn't load CI history", err.message);
+    console.error(err);
+  });
+
+  function fragmentFromHTML(html) {
+    var div = document.createElement("div");
+    div.innerHTML = html;
+    return div.firstChild;
+  }
+
+  function emptyStateHTML(title, detail) {
+    return '<div class="empty-state"><div class="big">—</div><div><strong>' + title + '</strong></div>' +
+      '<div style="margin-top:4px;max-width:52ch;margin-left:auto;margin-right:auto;">' + detail + '</div></div>';
+  }
+
+  function addStatTiles(stats) {
+    var row = document.getElementById("statRow");
+    stats.forEach(function (s) {
+      var tile = document.createElement("div");
+      tile.className = "stat-tile";
+      tile.innerHTML =
+        '<div class="label">' + s.label + '</div>' +
+        '<div class="value">' + s.value + '</div>' +
+        (s.note ? '<div class="note">' + s.note + '</div>' : "");
+      row.appendChild(tile);
+    });
+  }
+})();
+</script>
+</body>
+</html>
