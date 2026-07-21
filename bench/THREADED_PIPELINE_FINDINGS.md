@@ -1,5 +1,11 @@
 # Does the threaded replay pipeline actually help?
 
+> **Update, post-`LadderBook`-default and post-core-pinning**: this original
+> analysis (below) was measured against `OrderBook`, before `LadderBook` became
+> the production default. See [Phase 3 update](#phase-3-update-ladderbook-and-core-pinning)
+> at the end of this file for what changed, what didn't, and why the verdict
+> got *noisier*, not just different, once book mutation got cheaper.
+
 **No, not measurably.** Across four independent runs, end-to-end throughput for
 `replay_threaded_main.cpp` (parser thread → SPSC queue → book-builder thread)
 lands within noise of the single-threaded `replay_main.cpp` path — sometimes a
@@ -142,3 +148,89 @@ pay off if the balance of costs shifted (heavier parsing, cheaper book
 mutation, or a genuine need to run the two stages on separate cores for
 reasons other than throughput) — but `replay_main.cpp`'s single-threaded
 design is the right default for this codebase as it stands today.
+
+## Phase 3 update: LadderBook and core pinning
+
+Two things changed after the analysis above was written: `LadderBook`
+replaced `OrderBook` as the production default (see
+`docs/devlog-orderbook-vs-ladderbook.md`), and
+`pipeline::pin_this_thread_to_core` / `pipeline::CoreAffinity` were added so
+the parser and book-builder threads can request specific cores instead of
+leaving placement entirely to the OS scheduler (`include/pipeline/thread_affinity.hpp`,
+threaded through `run_pipeline` and exposed as `replay_threaded --pin`).
+Neither change was made to chase this benchmark specifically — LadderBook was
+Phase 1's production-wiring work, and pinning was Phase 3's own deliverable —
+but both bear directly on the "why it washes out" argument above, so it's
+worth closing the loop here.
+
+**The mechanism is asymmetric across platforms, and that asymmetry matters.**
+On Linux, `pin_this_thread_to_core` calls `pthread_setaffinity_np` — a real
+hard pin the kernel enforces. On macOS, it calls `thread_policy_set` with
+`THREAD_AFFINITY_POLICY` — a scheduling hint the kernel is free to ignore,
+and one that's documented to be especially weak on Apple Silicon's
+heterogeneous P/E-core design (`kHasHardAffinity` is `false` on macOS,
+`true` on Linux — see `thread_affinity.hpp` for the platform detail). Every
+number in this update was gathered on macOS during local development, so
+every "pinned" run below is asking the scheduler nicely, not commanding it.
+
+**LadderBook made mutation cheaper, which should widen the ceiling for
+threading, not narrow it.** Recall the bound from above:
+`(parse + mutate) / max(parse, mutate)`. The mutation side dropped
+substantially — `bench/results.csv` shows LadderBook's p50 at roughly half of
+OrderBook's per message type (e.g. type A: 84ns to 42ns; E/C/X: 167ns to
+125ns). If parsing cost is unchanged, mutation shrinking means parsing is now
+a larger relative share of the total per-message cost — exactly the direction
+that should make there be more parsing-side work to hide behind the handoff.
+Consistent with that, a single run taken right after Phase 1 landed (recorded
+in the README) showed a genuine ~1.2x threaded speedup — the first time in
+this project's history that threading won by a margin that wasn't just noise.
+
+**But four further runs, taken during Phase 3's pinning work, did not
+reproduce that win.** `bench/results_threaded.csv` (committed) holds one of
+them:
+
+| path | messages/s | best-of-N messages/s |
+|---|---|---|
+| single_threaded | 6.18M | 6.45M |
+| threaded_pipeline (unpinned) | 5.68M | 6.69M |
+| threaded_pinned (`--pin`, hint-only on macOS) | 6.03M | 6.18M |
+
+Single-threaded led on the median statistic in this run and in three of the
+four gathered this session; pinning sometimes narrowed the gap to threaded
+(as here) and sometimes widened it, with no consistent direction. Combined
+with the one earlier win, the honest read across all five LadderBook-era
+runs is **1 win, 4 losses/washes for threading, and no repeatable effect from
+requesting pinning** — noisier and less conclusive than the OrderBook-era
+result above, not more.
+
+**Why the verdict got noisier instead of just flipping.** The
+`(parse + mutate) / max(parse, mutate)` ceiling isn't a step function — moving
+mutation cost closer to parsing cost moves the system closer to the
+break-even point where the two stages are similarly sized, which is exactly
+the regime where scheduler noise, cache effects, and (on macOS) a
+best-effort pin request can each tip a single run either way. LadderBook
+didn't make threading a clear win; it moved this benchmark from "clearly not
+worth it" to "too close to call on this machine, with this measurement tool."
+That's a real, useful finding — it means the question is no longer settled by
+architecture alone and now depends on facts about the deployment platform
+that macOS can't supply.
+
+**Where the real answer will come from.** CI's `build-test` job now builds
+`bench_threaded` and runs it on `ubuntu-latest` as an informational step
+(`.github/workflows/ci.yml`) — real `pthread_setaffinity_np` hard-pinning, on
+every push and PR, printed to the log for a human to read across runs over
+time. It isn't gated on (hosted runners share physical cores with other
+tenants, so even a hard pin there is one more noisy sample, not a verdict),
+but unlike the five ad hoc local runs above, it accumulates automatically and
+on the one platform where "pinned" actually means pinned. Revisit this file
+once enough Linux runs have landed to see whether the hard-pin numbers settle
+in one direction where the macOS hint-based ones didn't.
+
+**Bottom line, updated:** LadderBook changed the inputs to the ceiling
+formula in the direction that favors threading, and one run reflected that.
+But the dominant, reproducible finding this session is that the question is
+now closer to break-even and more sensitive to scheduling noise than before —
+not that threading has become a clear win. `replay_main.cpp` remains the
+right default; `replay_threaded --pin` is there to keep asking this question
+cheaply as real Linux CI data accumulates, without needing new code each
+time.

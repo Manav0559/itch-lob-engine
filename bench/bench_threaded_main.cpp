@@ -69,6 +69,21 @@ PassTiming run_threaded_pass(const std::uint8_t* data, std::size_t len) {
     return {stats.frames, std::chrono::duration<double>(t1 - t0).count()};
 }
 
+// Same as run_threaded_pass, except the parser thread is pinned to core 0
+// and the book-builder thread to core 1 (see pipeline/thread_affinity.hpp).
+// This is the control the original threaded-pipeline verdict was missing:
+// without pinning, the OS scheduler can migrate either thread mid-run,
+// which can look identical to "decoupling doesn't help" in the aggregate
+// numbers while actually measuring migration noise instead of the design.
+PassTiming run_threaded_pinned_pass(const std::uint8_t* data, std::size_t len) {
+    const auto t0 = std::chrono::steady_clock::now();
+    auto stats = pipeline::run_pipeline<kQueueCapacity>(
+        [&](pipeline::QueueProducer<kQueueCapacity>& p) { itch::parse_stream(data, len, p); },
+        pipeline::CoreAffinity{0, 1});
+    const auto t1 = std::chrono::steady_clock::now();
+    return {stats.frames, std::chrono::duration<double>(t1 - t0).count()};
+}
+
 struct PathResult {
     std::string name;
     std::size_t frames = 0;
@@ -260,29 +275,46 @@ int main() {
 
     std::vector<CsvRow> rows;
 
-    std::printf("--- Task 2: single-threaded vs threaded pipeline, %d warm-up + %d measured "
-               "passes each ---\n",
+    std::printf("--- Task 2: single-threaded vs threaded pipeline (unpinned + pinned), %d "
+               "warm-up + %d measured passes each ---\n",
                1, kMeasuredPasses);
+    std::printf("core affinity mode: %s\n\n",
+               pipeline::kHasHardAffinity
+                   ? "hard pin (Linux pthread_setaffinity_np)"
+                   : "best-effort scheduling hint only (macOS THREAD_AFFINITY_POLICY - "
+                     "see README/thread_affinity.hpp for why this is not a real pin here)");
     const PathResult single =
         run_path("single_threaded", run_single_threaded_pass, data.data(), data.size());
     const PathResult threaded =
         run_path("threaded_pipeline", run_threaded_pass, data.data(), data.size());
+    const PathResult pinned =
+        run_path("threaded_pinned", run_threaded_pinned_pass, data.data(), data.size());
 
     const double speedup_median = threaded.median_msgs_per_sec / single.median_msgs_per_sec;
     const double speedup_best = threaded.best_msgs_per_sec / single.best_msgs_per_sec;
+    const double pinned_speedup_median = pinned.median_msgs_per_sec / single.median_msgs_per_sec;
+    const double pinned_speedup_best = pinned.best_msgs_per_sec / single.best_msgs_per_sec;
     std::printf("\nsingle_threaded    median %.3f s, %.0f msgs/s  (best pass %.0f msgs/s)\n",
                single.median_elapsed_s, single.median_msgs_per_sec, single.best_msgs_per_sec);
     std::printf("threaded_pipeline  median %.3f s, %.0f msgs/s  (best pass %.0f msgs/s)\n",
                threaded.median_elapsed_s, threaded.median_msgs_per_sec, threaded.best_msgs_per_sec);
-    std::printf("speedup (threaded / single), median passes = %.3fx  %s\n", speedup_median,
+    std::printf("threaded_pinned    median %.3f s, %.0f msgs/s  (best pass %.0f msgs/s)\n",
+               pinned.median_elapsed_s, pinned.median_msgs_per_sec, pinned.best_msgs_per_sec);
+    std::printf("speedup (unpinned threaded / single), median = %.3fx  %s\n", speedup_median,
                speedup_median >= 1.0 ? "(threaded faster)" : "(threaded SLOWER)");
-    std::printf("speedup (threaded / single), best passes   = %.3fx  %s\n\n", speedup_best,
+    std::printf("speedup (unpinned threaded / single), best   = %.3fx  %s\n", speedup_best,
                speedup_best >= 1.0 ? "(threaded faster)" : "(threaded SLOWER)");
+    std::printf("speedup (pinned threaded / single),   median = %.3fx  %s\n", pinned_speedup_median,
+               pinned_speedup_median >= 1.0 ? "(pinned threaded faster)" : "(pinned threaded SLOWER)");
+    std::printf("speedup (pinned threaded / single),   best   = %.3fx  %s\n\n", pinned_speedup_best,
+               pinned_speedup_best >= 1.0 ? "(pinned threaded faster)" : "(pinned threaded SLOWER)");
 
     rows.push_back({"throughput", single.name, single.frames, single.median_elapsed_s,
                     single.median_msgs_per_sec, single.best_msgs_per_sec, 0, 0, 0, 0});
     rows.push_back({"throughput", threaded.name, threaded.frames, threaded.median_elapsed_s,
                     threaded.median_msgs_per_sec, threaded.best_msgs_per_sec, 0, 0, 0, 0});
+    rows.push_back({"throughput", pinned.name, pinned.frames, pinned.median_elapsed_s,
+                    pinned.median_msgs_per_sec, pinned.best_msgs_per_sec, 0, 0, 0, 0});
 
     std::printf("--- Task 3: SPSC push()+pop() round-trip under real cross-thread contention "
                "(%zu envelopes) ---\n",

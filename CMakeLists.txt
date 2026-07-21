@@ -93,6 +93,7 @@ add_executable(unit_tests
   tests/test_replay_threaded.cpp
   tests/test_multicast_receiver.cpp
   tests/test_risk_gate.cpp
+  tests/test_thread_affinity.cpp
 )
 target_link_libraries(unit_tests PRIVATE itch exec ZLIB::ZLIB Threads::Threads
                                           Catch2::Catch2WithMain)

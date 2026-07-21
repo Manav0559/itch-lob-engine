@@ -33,9 +33,16 @@ using pipeline::RunStats;
 // mean something (a queue that's *always* full just measures its own size).
 constexpr std::size_t kQueueCapacity = 1u << 16;
 
+// --pin's fixed core assignment: parser on core 0, book-builder on core 1.
+// See pipeline/thread_affinity.hpp for what "pinned" means per platform.
+pipeline::CoreAffinity affinity_for(bool pin) {
+    if (!pin) return {};
+    return pipeline::CoreAffinity{0, 1};
+}
+
 template <typename BookType>
 void report(const BookBuilder<BookType>& h, std::size_t bytes, std::size_t frames, double secs,
-            std::size_t max_occupancy) {
+            std::size_t max_occupancy, bool pin) {
     std::size_t open_orders = 0, bid_levels = 0, ask_levels = 0;
     h.books.for_each([&](std::uint16_t, const BookType& b) {
         open_orders += b.open_orders();
@@ -63,47 +70,53 @@ void report(const BookBuilder<BookType>& h, std::size_t bytes, std::size_t frame
     std::printf("max queue occ    %zu / %zu (%.1f%% of capacity — backpressure indicator)\n",
                 max_occupancy, kQueueCapacity,
                 100.0 * static_cast<double>(max_occupancy) / static_cast<double>(kQueueCapacity));
+    if (pin) {
+        std::printf("core affinity    parser=core0 book_builder=core1 (%s)\n",
+                    pipeline::kHasHardAffinity ? "hard pin" : "best-effort hint only, see README");
+    }
 }
 
 template <typename BookType>
-int run(const std::uint8_t* data, std::size_t len) {
+int run(const std::uint8_t* data, std::size_t len, bool pin) {
     const auto t0 = std::chrono::steady_clock::now();
     RunStats<BookType> stats = pipeline::run_pipeline<kQueueCapacity, BookType>(
-        [&](QueueProducer<kQueueCapacity>& p) { itch::parse_stream(data, len, p); });
+        [&](QueueProducer<kQueueCapacity>& p) { itch::parse_stream(data, len, p); },
+        affinity_for(pin));
     const auto t1 = std::chrono::steady_clock::now();
     report(stats.builder, len, stats.frames, std::chrono::duration<double>(t1 - t0).count(),
-           stats.max_occupancy);
+           stats.max_occupancy, pin);
     return 0;
 }
 
 template <typename BookType>
-int run_mmap(const std::string& path) {
+int run_mmap(const std::string& path, bool pin) {
     io::MmapSource src(path);
     const auto t0 = std::chrono::steady_clock::now();
     RunStats<BookType> stats = pipeline::run_pipeline<kQueueCapacity, BookType>(
         [&](QueueProducer<kQueueCapacity>& p) {
             itch::parse_stream(src.data(), src.size(), p);
-        });
+        },
+        affinity_for(pin));
     const auto t1 = std::chrono::steady_clock::now();
     report(stats.builder, src.size(), stats.frames,
-           std::chrono::duration<double>(t1 - t0).count(), stats.max_occupancy);
+           std::chrono::duration<double>(t1 - t0).count(), stats.max_occupancy, pin);
     return 0;
 }
 
 template <typename BookType>
-int run_gzip(const std::string& path) {
+int run_gzip(const std::string& path, bool pin) {
     io::GzipSource src(path);
     const auto t0 = std::chrono::steady_clock::now();
     RunStats<BookType> stats = pipeline::run_pipeline<kQueueCapacity, BookType>(
-        [&](QueueProducer<kQueueCapacity>& p) { src.run(p); });
+        [&](QueueProducer<kQueueCapacity>& p) { src.run(p); }, affinity_for(pin));
     const auto t1 = std::chrono::steady_clock::now();
     report(stats.builder, src.bytes_decompressed(), stats.frames,
-           std::chrono::duration<double>(t1 - t0).count(), stats.max_occupancy);
+           std::chrono::duration<double>(t1 - t0).count(), stats.max_occupancy, pin);
     return 0;
 }
 
 template <typename BookType>
-int run_legacy(const std::string& path) {
+int run_legacy(const std::string& path, bool pin) {
     std::ifstream f(path, std::ios::binary | std::ios::ate);
     if (!f) {
         std::fprintf(stderr, "error: cannot open %s\n", path.c_str());
@@ -116,13 +129,13 @@ int run_legacy(const std::string& path) {
         std::fprintf(stderr, "error: short read on %s\n", path.c_str());
         return 1;
     }
-    return run<BookType>(buf.data(), buf.size());
+    return run<BookType>(buf.data(), buf.size(), pin);
 }
 
 // Same synthetic session as replay_main.cpp's selftest(), so the two
 // binaries are directly comparable on identical input.
 template <typename BookType>
-int selftest() {
+int selftest(bool pin) {
     using namespace itch::encode;
     Msg system_event;
     header(system_event, 'S', 0, 1);
@@ -139,22 +152,26 @@ int selftest() {
         replace(2, 160, 3001, 3002, 800, 4'199'500),  // MSFT bid moves down
         del(1, 170, 1002),                            // AAPL book now ask-only
     });
-    return run<BookType>(buf.data(), buf.size());
+    return run<BookType>(buf.data(), buf.size(), pin);
 }
 
 template <typename BookType>
-int dispatch_args(int argc, char** argv) {
-    if (argc == 2 && std::strcmp(argv[1], "--selftest") == 0) return selftest<BookType>();
-    if (argc == 3 && std::strcmp(argv[1], "--legacy") == 0) return run_legacy<BookType>(argv[2]);
+int dispatch_args(int argc, char** argv, bool pin) {
+    if (argc == 2 && std::strcmp(argv[1], "--selftest") == 0) return selftest<BookType>(pin);
+    if (argc == 3 && std::strcmp(argv[1], "--legacy") == 0) return run_legacy<BookType>(argv[2], pin);
     if (argc != 2) {
         std::fprintf(stderr,
-                     "usage: %s [--map] <file>   mmap (or gz-stream, if the name ends in .gz)\n"
-                     "                            and replay a NASDAQ ITCH 5.0 file through the\n"
-                     "                            parser-thread/book-builder-thread pipeline\n"
-                     "       %s [--map] --legacy <file>   read the whole file into memory first, then replay\n"
-                     "       %s [--map] --selftest        replay a built-in synthetic session\n"
+                     "usage: %s [--map] [--pin] <file>   mmap (or gz-stream, if the name ends in\n"
+                     "                            .gz) and replay a NASDAQ ITCH 5.0 file through\n"
+                     "                            the parser-thread/book-builder-thread pipeline\n"
+                     "       %s [--map] [--pin] --legacy <file>   read the whole file into memory\n"
+                     "                            first, then replay\n"
+                     "       %s [--map] [--pin] --selftest        replay a built-in synthetic session\n"
                      "       --map forces the std::map-based OrderBook instead of the default\n"
-                     "               LadderBook — an explicit A/B option, not a recommended default.\n",
+                     "               LadderBook — an explicit A/B option, not a recommended default.\n"
+                     "       --pin  pins the parser thread to core 0 and the book-builder thread\n"
+                     "               to core 1 (a real hard pin on Linux; a best-effort scheduling\n"
+                     "               hint only on macOS — see README's threaded-pipeline section).\n",
                      argv[0], argv[0], argv[0]);
         return 2;
     }
@@ -162,7 +179,7 @@ int dispatch_args(int argc, char** argv) {
     const std::string path = argv[1];
     const bool is_gz = path.size() >= 3 && path.compare(path.size() - 3, 3, ".gz") == 0;
     try {
-        return is_gz ? run_gzip<BookType>(path) : run_mmap<BookType>(path);
+        return is_gz ? run_gzip<BookType>(path, pin) : run_mmap<BookType>(path, pin);
     } catch (const std::exception& e) {
         std::fprintf(stderr, "error: %s\n", e.what());
         return 1;
@@ -184,6 +201,7 @@ bool consume_flag(int& argc, char** argv, const char* flag) {
 
 int main(int argc, char** argv) {
     const bool use_map = consume_flag(argc, argv, "--map");
-    return use_map ? dispatch_args<book::OrderBook>(argc, argv)
-                   : dispatch_args<book::LadderBook>(argc, argv);
+    const bool pin = consume_flag(argc, argv, "--pin");
+    return use_map ? dispatch_args<book::OrderBook>(argc, argv, pin)
+                   : dispatch_args<book::LadderBook>(argc, argv, pin);
 }
