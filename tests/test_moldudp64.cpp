@@ -257,3 +257,96 @@ TEST_CASE("MoldUdp64Receiver ignores heartbeats without disturbing sequencing "
     REQUIRE(frames == 9);
     assert_full_book(r);
 }
+
+// Exercises net::MoldUdp64Receiver::kMaxPendingPackets: a sender racing far
+// ahead of a stalled/slow receiver (here, one that never supplies the one
+// sequence number -- 1 -- the receiver actually needs) must not grow
+// `pending_` without bound. Unlike the gap-fill tests above, nothing ever
+// answers the receiver's retransmission requests here on purpose, so every
+// one of these packets stays buffered (never drains) for the life of the
+// test -- exactly the failure mode include/net/multicast_receiver.hpp's cap
+// exists for.
+TEST_CASE("MoldUdp64Receiver caps pending_ against a sender racing far ahead "
+          "of a stalled receiver, dropping the overflow instead of growing "
+          "unbounded",
+          "[concurrency]") {
+    const std::string group = "239.255.0.1";
+    const std::uint16_t data_port = 12391;
+    const std::uint16_t request_port = 12390;
+    const auto session = net::moldudp64::make_session("CAPTEST01");
+    // A short gap-fill timeout: every one of these packets leaves an open
+    // gap at seq 1 (nothing ever replies to the resulting retransmission
+    // requests), so net::MoldUdp64Receiver::resolve_gaps() runs its full
+    // kMaxGapFillAttempts wait on every single one of them -- keeping this
+    // small keeps the test itself fast without changing what's being
+    // verified (the cap on pending_'s size, not gap-fill timing).
+    constexpr auto kGapFillTimeout = std::chrono::milliseconds(2);
+    constexpr auto kDataTimeout = std::chrono::milliseconds(50);
+
+    std::unique_ptr<net::MoldUdp64Receiver> receiver;
+    try {
+        receiver = std::make_unique<net::MoldUdp64Receiver>(group, data_port, "127.0.0.1", request_port,
+                                                             session, kDataTimeout, kGapFillTimeout);
+    } catch (const std::exception& e) {
+        SUCCEED("multicast unavailable in this environment (join failed): " << e.what());
+        return;
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+
+    // More distinct out-of-range sequence numbers than the cap, all past
+    // seq 1 (the only one that would ever let anything drain), so pending_
+    // would grow past the cap here if the cap didn't exist.
+    const std::uint64_t kBurst = net::MoldUdp64Receiver::kMaxPendingPackets + 64;
+    std::exception_ptr sender_error;
+    std::thread sender_thread([&] {
+        try {
+            net::MoldUdp64Sender sender(group, data_port, request_port, session);
+            for (std::uint64_t seq = 2; seq < 2 + kBurst; ++seq) {
+                sender.send_raw(seq, 1);
+            }
+        } catch (...) {
+            sender_error = std::current_exception();
+        }
+    });
+
+    struct NullHandler {
+        void on_add(const itch::AddOrder&) {}
+        void on_execute(const itch::OrderExecuted&) {}
+        void on_execute_price(const itch::OrderExecutedPrice&) {}
+        void on_cancel(const itch::OrderCancel&) {}
+        void on_delete(const itch::OrderDelete&) {}
+        void on_replace(const itch::OrderReplace&) {}
+        void on_other(char, std::size_t) {}
+    } handler;
+
+    // Polls exactly kBurst times (once per packet sent above) rather than
+    // stopping the instant pending_count() reaches the cap -- reaching the
+    // cap only proves growth stopped, not that the *overflow* was actually
+    // refused, so this keeps consuming the rest of the burst past the cap
+    // to prove drops happen instead of pending_ quietly growing further.
+    // Generous overall deadline relative to the worst case (kBurst accepts,
+    // each potentially paying the full kMaxGapFillAttempts *
+    // kGapFillTimeout before the next packet is even read off the socket).
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(30);
+    for (std::uint64_t i = 0; i < kBurst && std::chrono::steady_clock::now() < deadline; ++i) {
+        receiver->poll(handler);
+    }
+    sender_thread.join();
+
+    if (sender_error) {
+        SUCCEED("multicast unavailable in this environment (send failed)");
+        return;
+    }
+    if (receiver->pending_count() < net::MoldUdp64Receiver::kMaxPendingPackets) {
+        SUCCEED("multicast unavailable/unreliable enough in this environment that fewer than "
+                "the cap's worth of packets arrived (see test_multicast_receiver.cpp for why "
+                "this is a clean skip, not a failure)");
+        return;
+    }
+
+    // The cap held (never exceeded), and some of the burst was actually
+    // refused rather than silently accepted past it.
+    CHECK(receiver->pending_count() == net::MoldUdp64Receiver::kMaxPendingPackets);
+    CHECK(receiver->dropped_pending_count() > 0);
+    CHECK(receiver->gap_fill_requests_sent() > 0);  // the open gap at seq 1 was genuinely retried
+}
