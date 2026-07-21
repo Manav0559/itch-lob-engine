@@ -1,6 +1,7 @@
 # itch-lob-engine
 
 [![CI](https://github.com/Manav0559/itch-lob-engine/actions/workflows/ci.yml/badge.svg)](https://github.com/Manav0559/itch-lob-engine/actions/workflows/ci.yml)
+[![Coverage](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/Manav0559/itch-lob-engine/main/coverage/coverage.json)](https://github.com/Manav0559/itch-lob-engine/actions/workflows/ci.yml)
 [![C++20](https://img.shields.io/badge/C%2B%2B-20-blue.svg)](https://en.cppreference.com/w/cpp/20)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
@@ -115,6 +116,13 @@ cmake --build build --target bench && ./build/bench && python3 bench/plot.py
       (`LadderBook`-backed, the same default production now uses), not
       just decode-in-isolation — 4.6M+ executions across seed runs, clean, no
       crashes found so far; see [fuzz/README.md](fuzz/README.md)
+- [x] Measured line/branch coverage, not just a test count: a dedicated CI
+      job builds `include/` + `src/` with `--coverage` (gcc), runs the full
+      112-test suite, and captures/filters the result with `lcov` — the
+      README badge above and every CI run's job summary report an actual
+      percentage instead of asserting thoroughness in prose; see
+      [coverage/README.md](coverage/README.md) for what's measured (and
+      deliberately *not* gated on, and why) and how to reproduce it locally.
 - [x] Dependency-light static results dashboard (`dashboard/index.html`):
       client-side `fetch()` of the committed `bench/*.csv` files, hand-rolled
       inline-SVG charts (no Node/npm, no CDN, no build step) — OrderBook vs.
@@ -177,6 +185,23 @@ cmake -B build -DCMAKE_BUILD_TYPE=Release
 cmake --build build --parallel
 ctest --test-dir build --output-on-failure
 ```
+
+Line/branch coverage (what CI's `coverage` job and the badge above measure):
+
+```bash
+cmake -B build-coverage -DCMAKE_BUILD_TYPE=Debug \
+  -DCMAKE_CXX_FLAGS="--coverage -O0" -DCMAKE_EXE_LINKER_FLAGS="--coverage"
+cmake --build build-coverage --parallel
+ctest --test-dir build-coverage --output-on-failure
+lcov --capture --directory build-coverage --output-file coverage/lcov.info --rc branch_coverage=1
+lcov --remove coverage/lcov.info '/usr/*' '*/_deps/*' '*/tests/*' \
+  --output-file coverage/lcov.filtered.info --rc branch_coverage=1
+lcov --list coverage/lcov.filtered.info --rc branch_coverage=1
+```
+
+See [coverage/README.md](coverage/README.md) for what's included/excluded,
+why there's no coverage-percentage gate, and how the README badge gets its
+number.
 
 Run the pipeline end-to-end without any data file:
 
