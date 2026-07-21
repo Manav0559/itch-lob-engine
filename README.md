@@ -22,6 +22,15 @@ warm-up pass + 3 measured passes. Regenerate with:
 cmake --build build --target bench && ./build/bench && python3 bench/plot.py
 ```
 
+## Architecture
+
+[docs/architecture.md](docs/architecture.md) — the two entry points (file
+replay vs. live UDP multicast), the shared `BookBuilder`/`BookTable`
+abstraction both replay binaries route through, the `OrderBook`/`LadderBook`
+swap point, and where the exec/risk-gate/fill-sim layer sits relative to the
+book — one page, diagrammed, meant to be read before anything else in this
+repo.
+
 ## Status
 
 - [x] ITCH 5.0 stream framing (2-byte length prefix; unknown/corrupt frames
