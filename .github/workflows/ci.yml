@@ -115,58 +115,75 @@ jobs:
       # numbers that never merged, and never gets a write-capable token in
       # the first place (GitHub forces GITHUB_TOKEN read-only on pull_request
       # runs regardless of the `permissions` block above).
-      - name: Record benchmark history
-        if: github.ref == 'refs/heads/main' && github.event_name == 'push'
-        run: python3 bench/check_budget.py record
-
-      # Commits bench/ci_history.csv back to main using the default
-      # GITHUB_TOKEN (see the job-level `permissions: contents: write` above).
-      # Only commits if `record` actually changed the file -- re-running for a
-      # commit/os pair already present in history is a no-op (see
-      # check_budget.py's `record` idempotency), so `git diff --staged --quiet`
-      # guards against empty commits. Both matrix legs (ubuntu-latest,
-      # macos-latest) append different rows for the same commit and race to
-      # push; the retry loop re-pulls and rebases before each attempt so the
-      # second job's push doesn't get rejected as non-fast-forward.
-      - name: Commit updated ci_history.csv
+      #
+      # record and commit are one step, not two: recovering from a failed
+      # push here has to re-run record, not just re-attempt the git commands
+      # -- see the retry loop's own comment below for why, which is also why
+      # this can no longer be "record once, then commit."
+      - name: Record and commit benchmark history
         if: github.ref == 'refs/heads/main' && github.event_name == 'push'
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add bench/ci_history.csv
-          if git diff --staged --quiet; then
-            echo "bench/ci_history.csv unchanged, nothing to commit"
-            exit 0
-          fi
-          git commit -m "bench: record CI history for ${GITHUB_SHA::12} (${{ matrix.os }})"
-          # The benchmark steps above regenerate bench/results.csv and
-          # bench/results_threaded.csv in place -- both are tracked files
-          # (see bench/README.md), so by this point they're unstaged
-          # modifications in the working tree. `git pull --rebase` refuses
-          # to run with any unstaged changes present, tracked-but-unrelated
-          # or not, so it failed unconditionally on every push until this
-          # fix -- restore them to what's already committed (ci_history.csv
-          # is the only file this step ever intends to commit; the run's
-          # freshly generated numbers were never meant to be, and rerunning
-          # bench/bench_threaded regenerates them again next time anyway).
-          git checkout -- bench/results.csv bench/results_threaded.csv
+
+          # bench/results.csv and bench/results_threaded.csv hold this run's
+          # own numbers (results.csv freshly regenerated in place by the
+          # benchmark step above; results_threaded.csv not yet touched this
+          # run, since bench_threaded runs later in this job, but handled
+          # the same way for consistency) -- record (below, possibly run
+          # more than once on a retry) needs to see that, not whatever's
+          # already committed. Saved aside so a retry can restore them after
+          # the loop's own `git checkout`/`git reset` discards the working
+          # tree's copy for the unrelated reason explained there.
+          cp bench/results.csv /tmp/results.csv
+          cp bench/results_threaded.csv /tmp/results_threaded.csv
+
           for i in 1 2 3; do
-            # A conflicting rebase (both matrix legs racing to append their
-            # own row to this same file) leaves the working tree mid-rebase
-            # with unmerged files -- every subsequent `git pull --rebase` in
-            # this loop then fails immediately with "Pulling is not possible
-            # because you have unmerged files," never actually retrying
-            # against the now-current origin/main. Abort any such leftover
-            # state before each attempt so a real conflict gets a genuine
-            # retry, not three fast, identical failures.
-            git rebase --abort 2>/dev/null || true
-            if git pull --rebase origin main && git push origin HEAD:main; then
+            cp /tmp/results.csv bench/results.csv
+            cp /tmp/results_threaded.csv bench/results_threaded.csv
+            python3 bench/check_budget.py record
+
+            # bench/results.csv/results_threaded.csv are tracked files the
+            # benchmark steps regenerate in place -- restore them to what's
+            # already committed before touching git history: `git pull`
+            # refuses to run with any unstaged changes present, tracked-
+            # but-unrelated or not, and these were never meant to be
+            # committed themselves (rerunning the benchmark regenerates
+            # them again next time anyway).
+            git checkout -- bench/results.csv bench/results_threaded.csv
+
+            git add bench/ci_history.csv
+            if git diff --staged --quiet; then
+              echo "bench/ci_history.csv unchanged, nothing to commit"
               exit 0
             fi
-            echo "push attempt $i failed (likely racing the other matrix leg); retrying"
+            git commit -m "bench: record CI history for ${GITHUB_SHA::12} (${{ matrix.os }})"
+
+            if git push origin HEAD:main; then
+              exit 0
+            fi
+
+            echo "push attempt $i failed (likely racing the other matrix leg); re-syncing and re-recording"
+            # Neither `git pull --rebase` nor a plain `git merge` (verified
+            # locally -- both behave identically here) can recover from
+            # this on retry: both matrix legs append DIFFERENT new rows
+            # immediately after the exact same last line of the exact same
+            # shared file, which is an unresolvable insertion-order
+            # ambiguity to every git merge strategy, not an occasional
+            # timing fluke that a retry alone fixes. This reproduced on
+            # every real race in this repo's own history: macos-latest's
+            # rows never once landed under the old pure pull --rebase
+            # retry, while ubuntu-latest -- which usually finishes and
+            # pushes first -- always did. The only structurally correct
+            # fix is to discard this leg's now-stale commit entirely, catch
+            # up to whatever the other leg already pushed, and re-run
+            # record from there: it's idempotent and purely append-only,
+            # so re-running it against the freshly-pulled file produces a
+            # clean append with nothing left to reconcile.
+            git fetch origin main --quiet
+            git reset --hard origin/main
             sleep $((RANDOM % 5 + 1))
           done
-          git rebase --abort 2>/dev/null || true
           echo "failed to push bench/ci_history.csv after 3 attempts"
           exit 1
 
