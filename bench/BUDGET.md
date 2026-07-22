@@ -16,19 +16,19 @@ schedules a noisy neighbor.
 
 So there are two separate checks with two separate jobs:
 
-## Check 1 — ratio gate (hard fail)
+## Check 1 — ratio gate (hard fail on Linux; warning on macOS)
 
 For every message type, `LadderBook`'s p50 must be under
 `--ratio-threshold` (default **0.90**, i.e. LadderBook must be at least 10%
 faster than OrderBook) of `OrderBook`'s p50, **on the same run**.
 
-This is the check that is allowed to fail the build. It works because it's
-a ratio computed within a single benchmark run on a single machine at a
-single moment — whatever noise inflates `OrderBook`'s numbers on a given CI
-run inflates `LadderBook`'s numbers too, so the ratio cancels most of that
-noise out. What it can't cancel out is a real regression: e.g. someone adds
-an allocation or a `std::map` lookup to `LadderBook`'s hot path and its
-advantage over `OrderBook` narrows or disappears.
+This is the check that is allowed to fail the build — on Linux. It works
+because it's a ratio computed within a single benchmark run on a single
+machine at a single moment — whatever noise inflates `OrderBook`'s numbers
+on a given CI run inflates `LadderBook`'s numbers too, so the ratio cancels
+most of that noise out. What it can't cancel out is a real regression: e.g.
+someone adds an allocation or a `std::map` lookup to `LadderBook`'s hot path
+and its advantage over `OrderBook` narrows or disappears.
 
 0.90 was picked as loose enough that normal CI jitter (which affects both
 books roughly proportionally) won't trip it — current healthy ratios range
@@ -36,6 +36,19 @@ from ~0.34 to ~0.78 (see `bench/results.csv`), so there's real headroom —
 but tight enough that a regression which makes LadderBook only marginally
 faster than OrderBook (defeating the entire point of the flat-ladder
 design) still fails.
+
+That noise-cancellation assumption held on `ubuntu-latest` but demonstrably
+didn't on `macos-latest`: real CI runs there showed ratios swinging from
+~75% to over 100% across three back-to-back attempts on completely
+unchanged code — GitHub's shared/virtualized macOS runners are noisy enough
+at the sub-microsecond absolute magnitudes these message types measure at
+(a few hundred ns) that even the ratio can't cancel it out. `cmd_check`
+(`check_budget.py`) downgrades a check-1 failure to a printed warning —
+never failing the build — specifically when `os_label` is macOS/Darwin;
+Linux keeps the real hard gate, since its numbers haven't shown this
+problem. This is the identical reasoning check 2 below is already
+informational-only for, just scoped to check 1 on the one platform where it
+turned out to be necessary too.
 
 ## Check 2 — drift warning (soft, informational)
 
