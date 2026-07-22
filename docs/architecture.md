@@ -13,13 +13,13 @@ A NASDAQ TotalView-ITCH 5.0 feed handler: it decodes the exchange's real
 binary wire protocol into typed messages (`itch::parse_stream` /
 `itch::dispatch`), replays them into a live limit order book per stock
 symbol (`BookBuilder` routing into `OrderBook` or `LadderBook`, one per
-`stock locate`), and — as a separate, currently-standalone layer exercised
-by its own tests — can schedule and risk-check child orders
-(Twap/Vwap/Pov/Almgren-Chriss → `RiskGate` → `FillSimulator`) against the
-quotes and prints that book produces. Two independent input paths (file
-replay and live UDP multicast) feed the same book-building core; two book
-implementations (`std::map`-based and flat-array-based) share the identical
-interface behind that core, swappable with one command-line flag.
+`stock locate`), and can schedule and risk-check child orders
+(Twap/Vwap/Pov/Almgren-Chriss → `RiskGate` → `FillSimulator`) directly off
+that live book's quotes and prints (`./build/replay_exec`). Two independent
+input paths (file replay and live UDP multicast) feed the same
+book-building core; two book implementations (`std::map`-based and
+flat-array-based) share the identical interface behind that core, swappable
+with one command-line flag.
 
 ## Data flow
 
@@ -45,7 +45,7 @@ flowchart TD
         LB["book::LadderBook\nflat tick-indexed vectors (default)"]
     end
 
-    subgraph ExecLayer["Execution layer (standalone, test-exercised — not wired into replay/live_replay yet)"]
+    subgraph ExecLayer["Execution layer (replay_exec: wired end to end off a live book)"]
         BBO["exec::Bbo / exec::TradeTick\n(best bid/ask, trade prints — derived from the book)"]
         STRAT["Twap / Vwap / Pov / AlmgrenChriss\n(include/exec/*.hpp)\nExecutionStrategy CRTP -> ChildOrderQueue"]
         RG["exec::RiskGate\n(include/exec/risk_gate.hpp)\nper-order + cumulative limits, kill switch"]
@@ -56,13 +56,14 @@ flowchart TD
     F2 --> P1
     P1 -- "replay (single-threaded)" --> BB
     P1 -- "replay_threaded" --> Q
+    P1 -- "replay_exec" --> BB
     Q --> BB
     F2 -. "live_replay: its own local\nunordered_map<locate,OrderBook>\nhandler, not pipeline::BookBuilder" .-> LiveBB["live_replay's BookBuilder"]
     BB --> BT
     BT --> OB
     BT --> LB
-    OB -. "book state (bbo, depth, open orders)" .-> BBO
-    LB -. "book state (bbo, depth, open orders)" .-> BBO
+    OB -- "book state (bbo, trade prints)\nexec::ReplayExecHandler\n(include/exec/replay_exec_handler.hpp)" --> BBO
+    LB -- "book state (bbo, trade prints)\nexec::ReplayExecHandler\n(include/exec/replay_exec_handler.hpp)" --> BBO
     BBO --> STRAT
     STRAT -- "ChildOrder" --> RG
     RG -- "accepted ChildOrder" --> FS
@@ -89,7 +90,10 @@ If your renderer doesn't do Mermaid, here's the same shape as plain text:
         +--> book::OrderBook   (std::map ladders,   --map flag, the A/B baseline)
         +--> book::LadderBook  (flat tick vectors,   default, production choice)
         |
-        v  (bbo / trade prints read off the book)
+        v  exec::ReplayExecHandler (include/exec/replay_exec_handler.hpp)
+        |  wraps BookBuilder for replay_exec; every mutation of the traded
+        |  locate publishes a fresh Bbo, every execute a TradeTick
+        v
  exec::Bbo, exec::TradeTick
         |
         v
@@ -110,6 +114,7 @@ If your renderer doesn't do Mermaid, here's the same shape as plain text:
 | `./build/replay_threaded` | `src/replay_threaded_main.cpp`, `include/pipeline/threaded_replay.hpp` | same file input and same `BookBuilder`/`BookTable` core as `replay`, but the parser and the book-builder run on separate threads joined by a lock-free `SpscQueue<Envelope>` (`include/pipeline/spsc_queue.hpp`); `dispatch_to_book` re-applies an `Envelope` decoded on the parser thread into the book on the consumer thread. Produces identical book state to `replay` — see `tests/test_replay_threaded.cpp`. |
 | `./build/live_replay` | `src/live_replay_main.cpp`, `include/net/multicast_receiver.hpp` | UDP multicast → `net::MoldUdp64Receiver` (session header, sequence-gap detection, retransmission-request round trip) → `itch::dispatch` → **its own local `BookBuilder`** over `std::unordered_map<locate, book::OrderBook>`. This is the one place in the diagram that does *not* go through `pipeline::BookBuilder`/`BookTable` or `LadderBook` — it predates that shared abstraction and hasn't been migrated onto it yet (a good next-step consolidation, not a hidden bug). |
 | `./build/multicast_sender` | `src/multicast_sender_main.cpp` | not a book-building path at all — a `MoldUdp64Sender` that replays a synthetic session onto the multicast group `live_replay` joins, and answers its retransmission requests. Exists to exercise `live_replay` without a real feed. |
+| `./build/replay_exec` | `src/replay_exec_main.cpp`, `include/exec/replay_exec_handler.hpp` | same file input and same `BookBuilder`/`BookTable` core as `replay`, wrapped by `exec::ReplayExecHandler`: every mutation of one `--locate` publishes a fresh `exec::Bbo` (and, on an execute, an `exec::TradeTick`) to a live `--strategy twap\|vwap\|pov\|almgren_chriss`, drains its `ChildOrderQueue` through `exec::RiskGate`, and scores fills with `exec::FillSimulator` — the strategy → risk → fill layer described below, running end to end instead of only under its own unit tests. |
 | `./build/bench`, `./build/bench_threaded` | `bench/bench_main.cpp`, `bench/bench_threaded_main.cpp` | drive the exact same `BookBuilder`/`BookTable` (and, for the threaded one, `pipeline::run_pipeline`) core as `replay`/`replay_threaded` against a synthetic in-memory session, so the benchmarked code path and the production path are provably the same code, not two implementations that happen to agree. |
 
 ## The book swap point
@@ -138,19 +143,21 @@ interface and push `ChildOrder`s into a fixed-capacity `ChildOrderQueue`;
 `RiskGate` is the documented, intended checkpoint between that queue and
 "wherever orders go next" (its own header comment names `FillSimulator` in
 this codebase, an OMS in a live one); `FillSimulator` scores those orders
-against a replayed `Bbo`/`TradeTick` stream. What they are *not*, as of this
-writing, is wired into `replay`/`replay_threaded`/`live_replay` end to end —
-each is exercised by its own focused test suite
-(`tests/test_exec_*.cpp`, `tests/test_risk_gate.cpp`,
-`tests/test_fill_sim.cpp`), not by a binary that reads book state and drives
-a strategy live off of it. The diagram's dashed arrow from the book to
-`exec::Bbo`/`TradeTick` marks that boundary honestly: the data shape lines
-up (both are plain, trivially-copyable structs a book could push on every
-change) but no code in `src/` or `bench/` currently does that pushing. Closing
-that gap — a `replay` mode that feeds a live book's quotes into a strategy
-into the risk gate into the fill simulator — is the natural next
-architectural step, not something this diagram should pretend already
-exists.
+against a replayed `Bbo`/`TradeTick` stream. `include/exec/replay_exec_handler.hpp`
+is the glue that closes what used to be a standalone-only layer: it wraps a
+`pipeline::BookBuilder<BookType>` exactly like `replay_query_main.cpp`'s
+`PublishingHandler` does, but instead of publishing a snapshot to a query
+server, it turns every mutation of one traded `--locate` into an
+`exec::Bbo`, and every execute into an `exec::TradeTick`, feeds a live
+strategy, and drains whatever it pushes through `exec::apply(RiskGate, ...)`
+and `FillSimulator::fill`. `src/replay_exec_main.cpp` is the CLI around it
+(`./build/replay_exec --selftest --strategy vwap`); `tests/test_replay_exec.cpp`
+drives the same handler directly, off the same synthetic session
+`replay`/`replay_query` self-test against, asserting the schedule-advances-
+off-the-tape-clock, trade-tick-attribution, and risk-gate-rejection
+invariants end to end. `replay`/`replay_threaded`/`live_replay` themselves
+are untouched by any of this — `replay_exec` is a fifth, additive binary,
+not a change to the three throughput-benchmarked ones.
 
 ## File map
 
@@ -164,9 +171,12 @@ include/
               — the shared book-building core and the threaded variant's plumbing
   exec/       types.hpp, execution_strategy.hpp, twap/vwap/pov/almgren_chriss.hpp, volume_curve.hpp, risk_gate.hpp, fill_sim.hpp
               — strategy -> risk -> fill layer described above
-src/          replay_main.cpp, replay_threaded_main.cpp, live_replay_main.cpp, multicast_sender_main.cpp — the four binaries
+              replay_exec_handler.hpp — the book-to-strategy glue replay_exec_main.cpp drives
+src/          replay_main.cpp, replay_threaded_main.cpp, live_replay_main.cpp, multicast_sender_main.cpp,
+              replay_query_main.cpp, replay_exec_main.cpp — the six binaries
 bench/        bench_main.cpp, bench_threaded_main.cpp, synthetic_session.hpp — reuse the same core against a synthetic session
 tests/        one file per component; test_full_day_invariants.cpp cross-checks OrderBook, LadderBook, and an independent
-              reference model against each other across a whole synthetic day
+              reference model against each other across a whole synthetic day; test_replay_exec.cpp drives
+              replay_exec_handler.hpp end to end off a synthetic session
 dashboard/    static HTML viewer for the committed bench/*.csv results (see dashboard/README.md)
 ```
