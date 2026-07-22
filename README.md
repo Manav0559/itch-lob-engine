@@ -2,6 +2,7 @@
 
 [![CI](https://github.com/Manav0559/itch-lob-engine/actions/workflows/ci.yml/badge.svg)](https://github.com/Manav0559/itch-lob-engine/actions/workflows/ci.yml)
 [![Coverage](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/Manav0559/itch-lob-engine/main/coverage/coverage.json)](https://github.com/Manav0559/itch-lob-engine/actions/workflows/ci.yml)
+[![Live Dashboard](https://img.shields.io/badge/dashboard-live-brightgreen.svg)](https://manav0559.github.io/itch-lob-engine/dashboard/)
 [![C++20](https://img.shields.io/badge/C%2B%2B-20-blue.svg)](https://en.cppreference.com/w/cpp/20)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
@@ -22,6 +23,23 @@ warm-up pass + 3 measured passes. Regenerate with:
 ```bash
 cmake --build build --target bench && ./build/bench && python3 bench/plot.py
 ```
+
+## Live Results
+
+**[Live dashboard →](https://manav0559.github.io/itch-lob-engine/dashboard/)**
+— interactive charts of everything below, regenerated from the same committed
+CSVs as this README.
+
+| Metric | OrderBook | LadderBook | Change |
+|---|---:|---:|---:|
+| Add, p50 latency | 166 ns | 42 ns | **3.95x faster** |
+| Mean p50 ratio (all 6 msg types) | 1.00 | 0.586 | **1.7x faster** |
+| Add, p99.9 (tail) latency | 10,709 ns | 4,125 ns | **2.60x faster** |
+| Threaded vs single-threaded throughput | 6.45M msg/s | 6.69M msg/s (best-of-3) | **1.04x** |
+| Line / branch coverage | — | 86.6% / 50.6% | 112 tests |
+
+Full per-message-type breakdown, plots, and methodology: see
+[Design notes](#design-notes) below and [bench/](bench/).
 
 ## Architecture
 
