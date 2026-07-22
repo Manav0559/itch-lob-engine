@@ -44,28 +44,32 @@ violated; drift warnings print to the step's log but never fail it.
 Check 2 needs `bench/ci_history.csv` to accumulate real CI numbers over
 time. That only happens for runs that actually merged to `main` (not every
 PR build, which could be from an unmerged or since-abandoned branch, and
-would pollute the history with numbers that never shipped). Two more steps
-run in the same job, after the budget check, gated to push-to-main only:
+would pollute the history with numbers that never shipped). One more step
+runs in the same job, after the budget check, gated to push-to-main only:
 
 ```yaml
-      - name: Record benchmark history
-        if: github.ref == 'refs/heads/main' && github.event_name == 'push'
-        run: python3 bench/check_budget.py record
-
-      - name: Commit updated ci_history.csv
+      - name: Record and commit benchmark history
         if: github.ref == 'refs/heads/main' && github.event_name == 'push'
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add bench/ci_history.csv
-          if git diff --staged --quiet; then
-            exit 0
-          fi
-          git commit -m "bench: record CI history for ${GITHUB_SHA::12} (${{ matrix.os }})"
+          cp bench/results.csv /tmp/results.csv
+          cp bench/results_threaded.csv /tmp/results_threaded.csv
           for i in 1 2 3; do
-            if git pull --rebase origin main && git push origin HEAD:main; then
+            cp /tmp/results.csv bench/results.csv
+            cp /tmp/results_threaded.csv bench/results_threaded.csv
+            python3 bench/check_budget.py record
+            git checkout -- bench/results.csv bench/results_threaded.csv
+            git add bench/ci_history.csv
+            if git diff --staged --quiet; then
               exit 0
             fi
+            git commit -m "bench: record CI history for ${GITHUB_SHA::12} (${{ matrix.os }})"
+            if git push origin HEAD:main; then
+              exit 0
+            fi
+            git fetch origin main --quiet
+            git reset --hard origin/main
             sleep $((RANDOM % 5 + 1))
           done
           exit 1
@@ -75,17 +79,18 @@ run in the same job, after the budget check, gated to push-to-main only:
 
 Notes on how this actually behaves in production:
 
-- `record` writes to the working tree's `bench/ci_history.csv`; the commit
-  step is what persists it back to `main`. This repo's Actions "Workflow
-  permissions" setting is "Read and write", and the `build-test` job
-  declares its own `permissions: contents: write` block (scoped to that job,
-  not the whole workflow, so `sanitize` and `fuzz-smoke` never get a
-  write-capable token they have no use for) — so the default `GITHUB_TOKEN`
-  is sufficient for the push. No PAT or deploy key is needed.
-- Both conditions (`github.ref == 'refs/heads/main'` and `github.event_name
-  == 'push'`) must hold for either step to run at all. A `pull_request`
-  event — including one opened from a fork — never runs these steps, and
-  separately GitHub always forces `GITHUB_TOKEN` to read-only on
+- `record` (`python3 bench/check_budget.py record`) writes to the working
+  tree's `bench/ci_history.csv`; the same step is what persists it back to
+  `main`. This repo's Actions "Workflow permissions" setting is "Read and
+  write", and the `build-test` job declares its own
+  `permissions: contents: write` block (scoped to that job, not the whole
+  workflow, so `sanitize` and `fuzz-smoke` never get a write-capable token
+  they have no use for) — so the default `GITHUB_TOKEN` is sufficient for
+  the push. No PAT or deploy key is needed.
+- The step's `if:` condition (`github.ref == 'refs/heads/main' &&
+  github.event_name == 'push'`) must hold for it to run at all. A
+  `pull_request` event — including one opened from a fork — never runs it,
+  and separately GitHub always forces `GITHUB_TOKEN` to read-only on
   `pull_request` runs regardless of any `permissions` block, so there's no
   path by which a fork PR could push to `main`.
 - `git diff --staged --quiet` guards the commit: if `record` was a no-op
@@ -93,13 +98,20 @@ Notes on how this actually behaves in production:
   `check_budget.py`'s `record` idempotency), there's nothing staged and the
   step exits 0 without creating an empty commit.
 - Because the matrix runs both `ubuntu-latest` and `macos-latest` in
-  parallel, both `Commit updated ci_history.csv` steps race to append their
-  own OS's rows for the same commit and push. The checkout step uses
-  `fetch-depth: 0` (full history, not the default shallow depth-1 clone) so
-  the retry loop's `git pull --rebase origin main` can actually rebase
-  against whatever the other matrix leg has already pushed, rather than
-  failing the push outright. Up to 3 pull-rebase-push attempts, with a small
-  random backoff between them, before giving up and failing the step.
+  parallel, both legs race to append their own OS's rows for the same
+  commit and push. This is a real, deterministic conflict, not just an
+  occasional timing fluke: both legs' commits insert different new rows
+  immediately after the exact same last line of the exact same shared
+  file, relative to the exact same parent commit -- an unresolvable
+  insertion-order ambiguity to *every* git merge strategy (verified: a
+  plain `git merge` conflicts here identically to `git pull --rebase`).
+  A retry that just re-attempts the git commands can't fix that; the loop
+  above instead discards the losing leg's stale commit outright
+  (`git fetch` + `git reset --hard origin/main`) and re-runs `record`
+  against the now-current file -- since `record` is idempotent and purely
+  appends, that produces a clean append with nothing left to reconcile.
+  Up to 3 record-commit-push attempts, with a small random backoff between
+  them, before giving up and failing the step.
 - If committing bot-authored changes back to `main` from CI is ever against
   this repo's policies, the alternative sketched in earlier revisions of
   this document still applies: drop the `record`/commit steps, upload
