@@ -71,28 +71,34 @@ jobs:
         run: cmake --build build --parallel --target bench
 
       - name: Run benchmark and check performance budget
-        # Hard-fails only if LadderBook's measured advantage over OrderBook
-        # regresses past bench/check_budget.py's ratio threshold — see
-        # bench/BUDGET.md for why this is a same-run ratio check, not an
-        # absolute-nanosecond one (CI runners are noisy/shared machines).
+        # Hard-fails on ubuntu-latest only if LadderBook's measured
+        # advantage over OrderBook regresses past bench/check_budget.py's
+        # ratio threshold — see bench/BUDGET.md for why this is a same-run
+        # ratio check, not an absolute-nanosecond one (CI runners are
+        # noisy/shared machines), and for why check_budget.py itself
+        # downgrades this same check to a non-blocking warning specifically
+        # on macos-latest: real CI runs there showed ratios swinging from
+        # ~75% to over 100% across three back-to-back attempts on completely
+        # unchanged code, which the retry logic below (designed for Linux's
+        # much smaller, occasional overshoot) isn't built to absorb.
         #
-        # Even a same-run ratio isn't fully noise-proof on a single pass:
-        # message type 'D' has always had the narrowest margin of any type
-        # (79.9% of the 90% threshold even in the very first committed
-        # numbers), so a shared/loaded CI runner can occasionally push a
-        # single ./build/bench invocation's ratio over the line without any
-        # real regression. This applies the same "a process can only get
-        # slower from outside interference, never faster, so the best of a
-        # few passes recovers the true noise-robust estimate" reasoning
-        # bench/bench_threaded_main.cpp already uses for its own pass timing
-        # (see its run_path()) — up to 3 fresh ./build/bench runs, succeeding
-        # on the first that clears the budget, rather than loosening the
-        # threshold to paper over noise on one run.
+        # On Linux, even a same-run ratio isn't fully noise-proof on a
+        # single pass: message type 'D' has always had the narrowest margin
+        # of any type (79.9% of the 90% threshold even in the very first
+        # committed numbers), so a shared/loaded CI runner can occasionally
+        # push a single ./build/bench invocation's ratio over the line
+        # without any real regression. This applies the same "a process can
+        # only get slower from outside interference, never faster, so the
+        # best of a few passes recovers the true noise-robust estimate"
+        # reasoning bench/bench_threaded_main.cpp already uses for its own
+        # pass timing (see its run_path()) — up to 3 fresh ./build/bench
+        # runs, succeeding on the first that clears the budget, rather than
+        # loosening the threshold to paper over noise on one run.
         #
         # Drift warnings (informational, never fail the build) need
         # bench/ci_history.csv to accumulate real numbers over time. That
-        # history is recorded and committed back to main automatically by the
-        # two steps below (repo Actions "Workflow permissions" is now "Read
+        # history is recorded and committed back to main automatically by
+        # the step below (repo Actions "Workflow permissions" is now "Read
         # and write", so this no longer needs a human to run
         # `python3 bench/check_budget.py record` by hand — see
         # bench/CI_INTEGRATION.md).
