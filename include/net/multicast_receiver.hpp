@@ -226,6 +226,13 @@ public:
     // buffered; a caller that cares (metrics, logs) should watch this
     // alongside gap_fill_requests_sent().
     std::uint64_t dropped_pending_count() const { return dropped_pending_; }
+    // Nonzero means at least one packet's header `count` field disagreed
+    // with the number of ITCH frames itch::parse_stream actually found in
+    // its payload — see drain()'s comment for why next_seq_ trusts the
+    // parsed count over this field, and why a nonzero value here is worth
+    // watching alongside dropped_pending_count() (a corrupt/adversarial
+    // sender, or a genuine framing bug, not a benign condition).
+    std::uint64_t count_mismatches() const { return count_mismatches_; }
 
     // Hard cap on how many not-yet-contiguous packets `pending_` (see the
     // class comment's "Gap handling" paragraph) will ever hold at once.
@@ -347,8 +354,28 @@ private:
         std::size_t frames = 0;
         while (!pending_.empty() && pending_.begin()->first == next_seq_) {
             auto node = pending_.begin();
-            frames += itch::parse_stream(node->second.payload.data(), node->second.payload.size(), handler);
-            next_seq_ += node->second.count;
+            // Advance next_seq_ by what itch::parse_stream actually parsed
+            // out of this packet's payload, not by the header's `count`
+            // field: `count` arrives over the network with no validation
+            // against the payload it labels, so a corrupted or adversarial
+            // packet whose declared count doesn't match its real message
+            // blocks would otherwise desync next_seq_ permanently and
+            // silently — too large a count skips real sequence numbers with
+            // no gap ever detected; too small treats already-applied
+            // sequence numbers as still pending. Using the parsed count
+            // instead is a no-op for any well-formed packet (parse_stream's
+            // frame count and the header's count agree by construction —
+            // see net/moldudp64.hpp's header comment), and for a malformed
+            // one it makes the mismatch self-correcting: next_seq_ stops
+            // short of where the real feed actually is, so the very next
+            // packet trips the ordinary gap-fill path in resolve_gaps()
+            // instead of running forever mis-synced with no gap ever
+            // flagged.
+            const std::size_t parsed =
+                itch::parse_stream(node->second.payload.data(), node->second.payload.size(), handler);
+            if (parsed != node->second.count) ++count_mismatches_;
+            frames += parsed;
+            next_seq_ += parsed;
             pending_.erase(node);
         }
         return frames;
@@ -371,6 +398,7 @@ private:
     bool ended_ = false;
     std::uint64_t requests_sent_ = 0;
     std::uint64_t dropped_pending_ = 0;
+    std::uint64_t count_mismatches_ = 0;
     std::map<std::uint64_t, PendingPacket> pending_;
 };
 
