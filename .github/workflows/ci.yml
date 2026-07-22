@@ -151,12 +151,22 @@ jobs:
           # bench/bench_threaded regenerates them again next time anyway).
           git checkout -- bench/results.csv bench/results_threaded.csv
           for i in 1 2 3; do
+            # A conflicting rebase (both matrix legs racing to append their
+            # own row to this same file) leaves the working tree mid-rebase
+            # with unmerged files -- every subsequent `git pull --rebase` in
+            # this loop then fails immediately with "Pulling is not possible
+            # because you have unmerged files," never actually retrying
+            # against the now-current origin/main. Abort any such leftover
+            # state before each attempt so a real conflict gets a genuine
+            # retry, not three fast, identical failures.
+            git rebase --abort 2>/dev/null || true
             if git pull --rebase origin main && git push origin HEAD:main; then
               exit 0
             fi
             echo "push attempt $i failed (likely racing the other matrix leg); retrying"
             sleep $((RANDOM % 5 + 1))
           done
+          git rebase --abort 2>/dev/null || true
           echo "failed to push bench/ci_history.csv after 3 attempts"
           exit 1
 
@@ -296,17 +306,24 @@ jobs:
       # (_deps/), and the test files themselves -- coverage of test code
       # isn't the question being answered here, coverage of include/ + src/
       # by the tests is.
-      # --ignore-errors mismatch: gcov's intermediate format occasionally
-      # disagrees with itself on exception-tag ids for STL header code
-      # instantiated across multiple translation units (seen here on
-      # /usr/include/c++/13/bits/stl_algo.h, pulled in via the vendored
-      # Catch2 build) -- a known lcov/gcov quirk, not a real data problem,
-      # and geninfo's own error text names this flag as the way past it.
+      # --ignore-errors mismatch,source: two distinct, known geninfo quirks
+      # against the vendored Catch2 build tree, neither a real coverage-data
+      # problem -- geninfo's own error text names both flags as the way past
+      # them:
+      #   mismatch: gcov's intermediate format occasionally disagrees with
+      #     itself on exception-tag ids for STL header code instantiated
+      #     across multiple translation units (seen on
+      #     /usr/include/c++/13/bits/stl_algo.h and friends).
+      #   source: geninfo resolving a .gcno-embedded relative path against
+      #     the wrong base directory for a FetchContent-vendored dependency
+      #     (seen as "unable to open .../catch2-build/src/src/catch2/..." --
+      #     that doubled src/src is the symptom, not a file that's actually
+      #     missing from the build).
       - name: Capture coverage with lcov
         run: |
           lcov --capture --directory build-coverage \
             --output-file coverage/lcov.info --rc branch_coverage=1 \
-            --ignore-errors mismatch
+            --ignore-errors mismatch,source
           lcov --remove coverage/lcov.info \
             '/usr/*' '*/_deps/*' '*/tests/*' \
             --output-file coverage/lcov.filtered.info \
@@ -337,12 +354,18 @@ jobs:
           fi
           git commit -m "coverage: update badge for ${GITHUB_SHA::12}"
           for i in 1 2 3; do
+            # See the identical comment on "Commit updated ci_history.csv"'s
+            # retry loop: a failed rebase leaves unmerged files behind, which
+            # makes every later attempt in this loop fail immediately without
+            # actually retrying, unless that state is cleared first.
+            git rebase --abort 2>/dev/null || true
             if git pull --rebase origin main && git push origin HEAD:main; then
               exit 0
             fi
             echo "push attempt $i failed (likely racing another job's push); retrying"
             sleep $((RANDOM % 5 + 1))
           done
+          git rebase --abort 2>/dev/null || true
           echo "failed to push coverage/coverage.json after 3 attempts"
           exit 1
 
