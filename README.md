@@ -132,6 +132,14 @@ repo.
       notional / price-collar limits plus a latching cumulative kill switch
       (requires an explicit `reset()` — no automatic self-healing) between a
       strategy's `ChildOrder` output and wherever orders go next
+- [x] Execution layer wired end to end (`replay_exec`): a live book's quotes
+      and prints drive Twap/Vwap/Pov/Almgren-Chriss directly — every mutation
+      of one traded `--locate` publishes an `exec::Bbo` (and, on an execute,
+      an `exec::TradeTick`) to the strategy, whose `ChildOrder`s are drained
+      through `RiskGate` and scored by `FillSimulator`, all off the real
+      parsed ITCH stream instead of hand-built test structs — see
+      `include/exec/replay_exec_handler.hpp` and
+      [docs/architecture.md](docs/architecture.md)'s exec-layer section
 - [x] Coverage-guided fuzzing of the ITCH parser (`fuzz/`): libFuzzer +
       ASan/UBSan against `itch::parse_stream` through a real `BookBuilder`
       (`LadderBook`-backed, the same default production now uses), not
@@ -364,6 +372,40 @@ spec). The concurrency boundary that makes this safe — the ingest side never
 blocks on, or races with, a query thread, and neither ever touches a book
 mutation lock — is `include/pipeline/book_snapshot.hpp`'s `SnapshotStore`;
 see its header comment for the full design.
+
+```bash
+./build/replay_exec --selftest --strategy vwap
+```
+
+```
+bytes            282
+frames           9
+elapsed          0.000 s
+locate traded    1
+child orders     attempted=1 accepted=1
+risk gate        ok
+fills            47 / 47 shares (100.0% fill rate)
+fill vwap        150.0000
+```
+
+`replay_exec` runs the same single-threaded replay as `replay` (same
+`<file>` / `--selftest` / `--map` arguments), but instead of just building
+the book, wires one live `--strategy twap|vwap|pov|almgren_chriss` to it:
+every mutation of `--locate`'s book (default `1`) publishes a fresh
+`exec::Bbo` to the strategy, every execute against that locate reconstructs
+an `exec::TradeTick`, and whatever the strategy pushes into its
+`ChildOrderQueue` is drained through `exec::RiskGate` (generous, hardcoded
+per-run limits — this binary demonstrates the pipeline, it isn't a risk
+console) and scored by `exec::FillSimulator`. `--shares`, `--side`,
+`--start-ts`/`--end-ts`/`--bin-ns`, `--participation-bps` (Pov),
+`--risk-aversion`/`--volatility`/`--impact-coefficient` (Almgren-Chriss),
+and `--limit-price` (Market child orders by default) tune the run; see
+`./build/replay_exec` with no arguments for the full flag reference. The
+glue itself — `include/exec/replay_exec_handler.hpp` — is header-only and
+directly test-exercised (`tests/test_replay_exec.cpp`), not just reachable
+by running the compiled binary; see
+[docs/architecture.md](docs/architecture.md)'s exec-layer section for how
+it fits against `replay`/`replay_threaded`/`live_replay`.
 
 ## License
 

@@ -65,6 +65,15 @@ add_executable(replay_query src/replay_query_main.cpp)
 target_link_libraries(replay_query PRIVATE itch ZLIB::ZLIB Threads::Threads)
 target_compile_options(replay_query PRIVATE ${PROJECT_WARNINGS})
 
+# Same single-threaded replay as `replay`, but wires the execution layer
+# (exec::Twap/Vwap/Pov/AlmgrenChriss -> RiskGate -> FillSimulator) to the live
+# book instead of just building it — see docs/architecture.md's exec-layer
+# section and src/replay_exec_main.cpp's header comment for the gap this
+# closes.
+add_executable(replay_exec src/replay_exec_main.cpp)
+target_link_libraries(replay_exec PRIVATE itch exec ZLIB::ZLIB)
+target_compile_options(replay_exec PRIVATE ${PROJECT_WARNINGS})
+
 # OrderBook vs LadderBook latency harness (see bench/README.md). Not part of
 # `ctest` — it's a manual-run benchmark, not a correctness check — but it
 # builds under the same warning-as-error bar as everything else.
@@ -108,6 +117,7 @@ add_executable(unit_tests
   tests/test_thread_affinity.cpp
   tests/test_book_snapshot.cpp
   tests/test_query_server.cpp
+  tests/test_replay_exec.cpp
 )
 target_link_libraries(unit_tests PRIVATE itch exec ZLIB::ZLIB Threads::Threads
                                           Catch2::Catch2WithMain)
@@ -126,3 +136,10 @@ add_test(NAME replay_selftest COMMAND replay --selftest)
 # instead of running until Ctrl-C, the way plain `replay_query --selftest`
 # (a manual/demo invocation, not this test) does by default.
 add_test(NAME replay_query_selftest COMMAND replay_query --selftest --serve-seconds 1)
+
+# replay_exec must also work end-to-end without a data file, for every
+# strategy the --strategy flag accepts.
+add_test(NAME replay_exec_selftest_twap COMMAND replay_exec --selftest --strategy twap)
+add_test(NAME replay_exec_selftest_vwap COMMAND replay_exec --selftest --strategy vwap)
+add_test(NAME replay_exec_selftest_pov COMMAND replay_exec --selftest --strategy pov)
+add_test(NAME replay_exec_selftest_almgren_chriss COMMAND replay_exec --selftest --strategy almgren_chriss)
