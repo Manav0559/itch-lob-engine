@@ -296,10 +296,17 @@ jobs:
       # (_deps/), and the test files themselves -- coverage of test code
       # isn't the question being answered here, coverage of include/ + src/
       # by the tests is.
+      # --ignore-errors mismatch: gcov's intermediate format occasionally
+      # disagrees with itself on exception-tag ids for STL header code
+      # instantiated across multiple translation units (seen here on
+      # /usr/include/c++/13/bits/stl_algo.h, pulled in via the vendored
+      # Catch2 build) -- a known lcov/gcov quirk, not a real data problem,
+      # and geninfo's own error text names this flag as the way past it.
       - name: Capture coverage with lcov
         run: |
           lcov --capture --directory build-coverage \
-            --output-file coverage/lcov.info --rc branch_coverage=1
+            --output-file coverage/lcov.info --rc branch_coverage=1 \
+            --ignore-errors mismatch
           lcov --remove coverage/lcov.info \
             '/usr/*' '*/_deps/*' '*/tests/*' \
             --output-file coverage/lcov.filtered.info \
