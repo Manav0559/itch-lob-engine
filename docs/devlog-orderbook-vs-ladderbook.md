@@ -248,3 +248,26 @@ reason.** That's a real answer, not a shrug — it's just not the answer "the
 synthetic numbers were right all along" would have been, and it's a more
 useful place to have landed than either an untested claim or another
 truncated download.
+
+### Follow-up 1 landed: `LadderBook` now grows instead of rejecting
+
+`add()` on a price outside the current range now calls `grow_to_include()`
+first — rebuilding the ladder around a wider window (same `window_pct` the
+book was constructed with, re-centered on the new price) and re-homing every
+resting order at its new array index — and only falls through to the old
+reject-outright behavior if the resulting range would blow a hard tick-count
+ceiling (`kMaxTicks`, independent of `tick_size_`, guarding the same class of
+unbounded-allocation risk `BookTraits<LadderBook>::kMaxSanePrice` already
+guards at construction). A fixed `kWindowPct = 0.30` is still what
+`BookTraits<LadderBook>` constructs the ladder with initially; the fix is
+that it's no longer the ceiling.
+
+This is a source-level fix, verified by a dedicated regression test
+(`tests/test_ladder_book.cpp`) exercising growth in both directions,
+verifying pre-growth levels/best-bid/best-ask survive the reallocation
+untouched, and verifying the `kMaxTicks` refusal path — not yet by a second
+run against the same real NASDAQ day file, since that file isn't sitting on
+this machine right now and re-downloading it is exactly the multi-hour-if-
+done-wrong exercise "Closing the open question" above already documented
+once. Follow-up 2 (re-running the real-day comparison and folding those
+numbers into the primary benchmark claim) is still open.
