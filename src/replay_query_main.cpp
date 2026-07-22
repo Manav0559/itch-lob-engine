@@ -65,7 +65,7 @@ struct PublishingHandler {
     void maybe_publish() {
         if (publish_every == 0 || ++since_publish < publish_every) return;
         since_publish = 0;
-        store.publish(pipeline::snapshot_book_table(inner.books));
+        store.publish(pipeline::snapshot_book_table(inner.books), inner.unknown_refs);
         if (pace.count() > 0) std::this_thread::sleep_for(pace);
     }
 
@@ -105,14 +105,17 @@ struct Options {
 };
 
 void report(std::size_t bytes, std::size_t frames, double secs, std::size_t books,
-            std::size_t open_orders, std::uint64_t snapshot_version) {
+            std::size_t open_orders, std::uint64_t snapshot_version, std::uint64_t unknown_refs) {
     std::printf("bytes            %zu\n", bytes);
     std::printf("frames           %zu\n", frames);
     std::printf("elapsed          %.3f s\n", secs);
     std::printf("books            %zu\n", books);
     std::printf("open orders      %zu\n", open_orders);
+    std::printf("unknown refs     %llu\n", static_cast<unsigned long long>(unknown_refs));
     std::printf("snapshot version %llu (query server always answers from this store, never\n"
-                "                 the live book — see include/pipeline/book_snapshot.hpp)\n",
+                "                 the live book — see include/pipeline/book_snapshot.hpp;\n"
+                "                 unknown_refs above is also part of every list/quote\n"
+                "                 response — see include/net/query_server.hpp)\n",
                 static_cast<unsigned long long>(snapshot_version));
 }
 
@@ -160,12 +163,12 @@ int run(const Options& opt, const std::uint8_t* data, std::size_t len) {
     // parsed above may not have crossed maybe_publish()'s threshold, so
     // without this the served snapshot could be stale relative to the
     // book's true final state.
-    store.publish(pipeline::snapshot_book_table(h.books));
+    store.publish(pipeline::snapshot_book_table(h.books), h.unknown_refs);
 
     std::size_t open_orders = 0;
     h.books.for_each([&](std::uint16_t, const BookType& b) { open_orders += b.open_orders(); });
     report(len, frames, std::chrono::duration<double>(t1 - t0).count(), h.books.book_count(),
-          open_orders, store.version());
+          open_orders, store.version(), h.unknown_refs);
 
     serve(opt);
     server.stop();
@@ -192,12 +195,12 @@ int run_gzip(const Options& opt, const std::string& path) {
     const std::size_t frames = src.run(handler);
     const auto t1 = std::chrono::steady_clock::now();
 
-    store.publish(pipeline::snapshot_book_table(h.books));
+    store.publish(pipeline::snapshot_book_table(h.books), h.unknown_refs);
 
     std::size_t open_orders = 0;
     h.books.for_each([&](std::uint16_t, const BookType& b) { open_orders += b.open_orders(); });
     report(src.bytes_decompressed(), frames, std::chrono::duration<double>(t1 - t0).count(),
-          h.books.book_count(), open_orders, store.version());
+          h.books.book_count(), open_orders, store.version(), h.unknown_refs);
 
     serve(opt);
     server.stop();

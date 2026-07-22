@@ -15,9 +15,10 @@ namespace book {
 // semantics — but the two std::map ladders are replaced with flat arrays
 // indexed by (price - min_price_) / tick_size_. A single level's lookup and
 // mutation become O(1) array indexing instead of O(log levels) tree work, at
-// the cost of a bounded price range fixed at construction: add() rejects a
-// price outside that range the same way it rejects a duplicate ref (false
-// return, no partial state), rather than growing the ladder to fit.
+// the cost of a bounded price range: add() on a price outside the current
+// range first tries to grow the ladder to fit (see grow_to_include() below)
+// and only rejects — the same way it rejects a duplicate ref, a clean false,
+// no partial state — once that range would exceed a hard allocation ceiling.
 //
 // tick_size_ is a real constraint, not just a memory-vs-range knob: prices
 // must land exactly on the (min_price_, min_price_ + tick_size_, ...) grid,
@@ -29,10 +30,18 @@ namespace book {
 //
 // The window defaults to +/-20% around the caller-supplied reference price,
 // which comfortably covers a normal trading day for one name. A name that
-// gaps or halts past that band needs a wider window_pct passed explicitly —
-// there is no way to resize after construction. This bounded-range tradeoff,
-// weighed against std::map's unbounded range, is exactly what the benchmark
-// harness measures OrderBook against.
+// gaps or halts past that band no longer gets every message past it silently
+// rejected: add() detects an out-of-range price and rebuilds the ladder
+// around a wider window (grow_to_include(), below) before retrying, up to a
+// hard tick-count ceiling (kMaxTicks) that keeps a single adversarial or
+// corrupt wire price from turning into an unbounded allocation. This
+// replaces a real, measured production bug — see
+// docs/devlog-orderbook-vs-ladderbook.md's "Closing the open question": a
+// fixed, never-widening window silently dropped ~30% of order-mutating
+// messages on a full real NASDAQ day file, because roughly a third of real
+// symbols moved outside a flat +/-30% band at some point in the session.
+// This bounded-but-growable range, weighed against std::map's unbounded
+// range, is exactly what the benchmark harness measures OrderBook against.
 //
 // best_bid()/best_ask() never scan the ladder: a "best occupied index" per
 // side is tracked incrementally. It advances/retreats past emptied levels
@@ -43,11 +52,14 @@ public:
                          double window_pct = 0.20)
         : LadderBook(tick_size == 0 ? 1 : tick_size,
                      snap_to_tick(window_low(base_price, window_pct), tick_size == 0 ? 1 : tick_size),
-                     window_high(base_price, window_pct)) {}
+                     window_high(base_price, window_pct), window_pct) {}
 
     bool add(std::uint64_t ref, itch::Side side, std::uint32_t shares, std::uint32_t price) {
-        // Rejected the same way an out-of-range price is: false, no partial
-        // state. idx() below is integer division by tick_size_ — a price
+        // An out-of-range price grows the ladder (see grow_to_include())
+        // instead of getting rejected outright — growth can itself refuse
+        // (kMaxTicks) for a price so extreme it would blow the allocation
+        // ceiling, which still falls through to the same false-return path
+        // below. idx() below is integer division by tick_size_ — a price
         // that isn't grid-aligned to min_price_ would floor-divide into
         // whatever slot is nearest, silently colliding with a real adjacent
         // price level instead of getting its own. That's harmless for a
@@ -55,7 +67,8 @@ public:
         // original use), but a real ITCH feed can carry sub-penny prices
         // (Reg NMS Rule 612 permits them under $1), so this check matters
         // now that LadderBook is wired into production against real files.
-        if (!in_range(price) || (price - min_price_) % tick_size_ != 0) return false;
+        if (!in_range(price) && !grow_to_include(price)) return false;
+        if ((price - min_price_) % tick_size_ != 0) return false;
         const auto [it, inserted] = orders_.try_emplace(ref, Order{shares, price, side});
         if (!inserted) return false;  // duplicate ref: never double-count a level
         const std::size_t i = idx(price);
@@ -120,10 +133,12 @@ private:
         itch::Side side;
     };
 
-    LadderBook(std::uint32_t tick_size, std::uint32_t min_price, std::uint32_t max_price)
+    LadderBook(std::uint32_t tick_size, std::uint32_t min_price, std::uint32_t max_price,
+               double window_pct)
         : tick_size_(tick_size),
           min_price_(min_price),
           max_price_(check_range(min_price, max_price)),
+          window_pct_(window_pct),
           num_ticks_(static_cast<std::size_t>(max_price_ - min_price_) / tick_size_ + 1),
           bids_(num_ticks_),
           asks_(num_ticks_) {}
@@ -173,6 +188,68 @@ private:
 
     bool in_range(std::uint32_t price) const {
         return price >= min_price_ && price <= max_price_;
+    }
+
+    // Hard ceiling on ticks-per-side any single grow_to_include() call (or
+    // the initial construction) will ever allocate for, independent of
+    // tick_size_ — this is a property of the class itself, not something
+    // every caller has to remember to clamp the price it grows toward (see
+    // pipeline::BookTraits<LadderBook>::kMaxSanePrice in dispatch_to_book.hpp
+    // for the analogous, but construction-only and caller-side, guard this
+    // complements). At production's tick_size_=100, 8,000,000 ticks per side
+    // covers an $8,000,000 price span — already absurd for a real equity —
+    // while still bounding a single LadderBook's worst-case footprint to a
+    // few hundred MB (2 sides * 8e6 ticks * sizeof(Level)) instead of
+    // whatever an adversarial or corrupt wire price would otherwise demand.
+    static constexpr std::size_t kMaxTicks = 8'000'000;
+
+    // Called by add() when `price` falls outside [min_price_, max_price_]:
+    // computes a wider range (same window_pct_ this book was built with,
+    // re-centered so it still comfortably covers `price`) and rebuilds the
+    // ladder around it, re-homing every resting order's level at its new
+    // array index. Returns false — refusing to grow, leaving add() to reject
+    // the price exactly as it did before this existed — only when the
+    // resulting range would exceed kMaxTicks; true otherwise, including the
+    // case where growth succeeds but the grid-alignment check right after
+    // this call still rejects the price on its own separate grounds.
+    bool grow_to_include(std::uint32_t price) {
+        std::uint32_t new_min = min_price_;
+        std::uint32_t new_max = max_price_;
+        if (price < min_price_)
+            new_min = std::min(min_price_, snap_to_tick(window_low(price, window_pct_), tick_size_));
+        if (price > max_price_) new_max = std::max(max_price_, window_high(price, window_pct_));
+        if (new_min == min_price_ && new_max == max_price_) return true;  // already covers it
+
+        const std::size_t new_num_ticks =
+            static_cast<std::size_t>(new_max - new_min) / tick_size_ + 1;
+        if (new_num_ticks > kMaxTicks) return false;
+
+        resize_range(new_min, new_max, new_num_ticks);
+        return true;
+    }
+
+    // Reallocates bids_/asks_ to the new range and copies every existing
+    // level to its new index (offset by how far the low end moved) — never
+    // drops a resting order or level, since min_price_ only ever moves down
+    // and max_price_ only ever moves up (grow_to_include() never shrinks the
+    // range), so every old index has a valid new home.
+    void resize_range(std::uint32_t new_min, std::uint32_t new_max, std::size_t new_num_ticks) {
+        const std::size_t offset = static_cast<std::size_t>(min_price_ - new_min) / tick_size_;
+
+        std::vector<Level> new_bids(new_num_ticks);
+        std::vector<Level> new_asks(new_num_ticks);
+        for (std::size_t i = 0; i < num_ticks_; ++i) {
+            new_bids[i + offset] = bids_[i];
+            new_asks[i + offset] = asks_[i];
+        }
+        bids_ = std::move(new_bids);
+        asks_ = std::move(new_asks);
+
+        min_price_ = new_min;
+        max_price_ = new_max;
+        num_ticks_ = new_num_ticks;
+        if (best_bid_idx_) best_bid_idx_ = *best_bid_idx_ + offset;
+        if (best_ask_idx_) best_ask_idx_ = *best_ask_idx_ + offset;
     }
     std::size_t idx(std::uint32_t price) const {
         return static_cast<std::size_t>((price - min_price_) / tick_size_);
@@ -248,6 +325,7 @@ private:
     std::uint32_t tick_size_;
     std::uint32_t min_price_;
     std::uint32_t max_price_;
+    double window_pct_;
     std::size_t num_ticks_;
     std::vector<Level> bids_;
     std::vector<Level> asks_;

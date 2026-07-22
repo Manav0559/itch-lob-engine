@@ -93,12 +93,18 @@ std::vector<LocateSnapshot> snapshot_book_table(const BookTable<BookType>& books
 // how often publish() runs, which is deliberately rare.
 class SnapshotStore {
 public:
-    // Swaps in a freshly built snapshot. Takes the vector by value/move so
-    // the (already-completed) O(symbol count) work of building it never
-    // happens while the lock is held — only the move-assignment does.
-    void publish(std::vector<LocateSnapshot> next) {
+    // Swaps in a freshly built snapshot, plus the ingest side's running
+    // unknown_refs count (pipeline::BookBuilder::unknown_refs — see
+    // dispatch_to_book.hpp) as of the same instant, under the same lock —
+    // so a query answer can always be read alongside how out-of-sync the
+    // book it came from is, instead of that count being visible only in the
+    // ingest process's own stdout report at the very end of a run. See
+    // src/replay_query_main.cpp's report() and net::query_wire's *_json
+    // functions for where this actually reaches a caller.
+    void publish(std::vector<LocateSnapshot> next, std::uint64_t unknown_refs = 0) {
         std::lock_guard<std::mutex> lock(mu_);
         data_ = std::move(next);
+        unknown_refs_ = unknown_refs;
         ++version_;
     }
 
@@ -108,6 +114,11 @@ public:
     std::vector<LocateSnapshot> read_all() const {
         std::lock_guard<std::mutex> lock(mu_);
         return data_;
+    }
+
+    std::uint64_t unknown_refs() const {
+        std::lock_guard<std::mutex> lock(mu_);
+        return unknown_refs_;
     }
 
     std::optional<LocateSnapshot> find(std::uint16_t locate) const {
@@ -130,6 +141,7 @@ private:
     mutable std::mutex mu_;
     std::vector<LocateSnapshot> data_;
     std::uint64_t version_ = 0;
+    std::uint64_t unknown_refs_ = 0;
 };
 
 }  // namespace pipeline
