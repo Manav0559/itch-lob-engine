@@ -121,17 +121,66 @@ TEST_CASE("over-execute clamps to resting size and still cleans up [ladder]") {
     CHECK(b.ask_levels() == 0);
 }
 
-TEST_CASE("price outside the ladder window is rejected like a duplicate ref [ladder]") {
-    LadderBook b(10'000'000);          // window is [8'000'000, 12'000'000]
+TEST_CASE("a price outside the ladder window grows the ladder instead of being rejected [ladder]") {
+    // Regression test for a real bug found on a full real NASDAQ day file
+    // (see docs/devlog-orderbook-vs-ladderbook.md's "Closing the open
+    // question"): a fixed, never-widening window silently rejected ~30% of
+    // real order-mutating messages, because a name gapping or halting past
+    // its opening window used to have no way back in. tick_size=100 (rather
+    // than the default 1) matches what production actually constructs this
+    // with — see pipeline::BookTraits<LadderBook> — and keeps this test's
+    // two successive growths well clear of kMaxTicks, which a tick_size=1
+    // ladder spanning the same dollar range would not.
+    LadderBook b(10'000'000, /*tick_size=*/100);  // window starts at [8'000'000, 12'000'000]
 
-    CHECK_FALSE(b.add(1, Side::Buy, 100, 7'999'999));   // below the floor
-    CHECK_FALSE(b.add(1, Side::Sell, 100, 12'000'001)); // above the ceiling
+    REQUIRE(b.add(1, Side::Buy, 100, 7'900'000));   // below the original floor
+    CHECK(b.best_bid()->price == 7'900'000);
+    CHECK(b.open_orders() == 1);
+
+    REQUIRE(b.add(2, Side::Sell, 100, 12'100'000)); // above the original ceiling
+    CHECK(b.best_ask()->price == 12'100'000);
+    CHECK(b.open_orders() == 2);
+
+    REQUIRE(b.add(3, Side::Buy, 50, 10'000'000));   // back inside the original window
+    CHECK(b.best_bid()->price == 10'000'000);       // higher than 7'900'000 — still tracked correctly
+    CHECK(b.open_orders() == 3);
+
+    REQUIRE(b.execute(1, 100));                     // the pre-growth order still works post-growth
+    CHECK(b.open_orders() == 2);
+}
+
+TEST_CASE("growth preserves existing levels, best bid/ask, and open orders exactly [ladder]") {
+    LadderBook b(10'000'000, /*tick_size=*/100);    // window [8'000'000, 12'000'000] at $0.01 ticks
+    REQUIRE(b.add(1, Side::Buy, 200, 9'900'000));
+    REQUIRE(b.add(2, Side::Buy, 100, 9'800'000));
+    REQUIRE(b.add(3, Side::Sell, 300, 10'100'000));
+
+    REQUIRE(b.add(4, Side::Buy, 500, 5'000'000));   // well below the original floor: forces growth
+
+    // Pre-growth levels/quotes must survive the reallocation untouched.
+    CHECK(b.best_bid()->price == 9'900'000);
+    CHECK(b.best_bid()->shares == 200);
+    CHECK(b.best_ask()->price == 10'100'000);
+    CHECK(b.bid_levels() == 3);
+    CHECK(b.ask_levels() == 1);
+    CHECK(b.open_orders() == 4);
+
+    REQUIRE(b.execute(2, 100));                     // pre-growth order, a non-best level
+    CHECK(b.bid_levels() == 2);
+    CHECK(b.best_bid()->price == 9'900'000);        // best bid itself untouched
+}
+
+TEST_CASE("growth past kMaxTicks refuses rather than attempting an unbounded allocation [ladder]") {
+    // A price this far outside the window would need many millions of
+    // ticks to cover — grow_to_include() must refuse (add() returns false,
+    // no partial state) instead of attempting that allocation, the same
+    // fail-safe kMaxSanePrice already provides at construction time (see
+    // pipeline::BookTraits<LadderBook> in dispatch_to_book.hpp) but now
+    // covering a price arriving after construction too.
+    LadderBook b(10'000'000, /*tick_size=*/1, /*window_pct=*/0.20);
+    CHECK_FALSE(b.add(1, Side::Buy, 100, 4'000'000'000u));
     CHECK(b.open_orders() == 0);
     CHECK_FALSE(b.best_bid().has_value());
-    CHECK_FALSE(b.best_ask().has_value());
-
-    REQUIRE(b.add(1, Side::Buy, 100, 12'000'000));      // ceiling itself is in range
-    CHECK(b.best_bid()->price == 12'000'000);
 }
 
 TEST_CASE("base_price near UINT32_MAX does not overflow the window into an oversized ladder [ladder]") {
