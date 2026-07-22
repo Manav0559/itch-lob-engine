@@ -349,4 +349,13 @@ TEST_CASE("MoldUdp64Receiver caps pending_ against a sender racing far ahead "
     CHECK(receiver->pending_count() == net::MoldUdp64Receiver::kMaxPendingPackets);
     CHECK(receiver->dropped_pending_count() > 0);
     CHECK(receiver->gap_fill_requests_sent() > 0);  // the open gap at seq 1 was genuinely retried
+    // resolve_gaps() gives up after kMaxGapFillAttempts on every single one
+    // of these packets (nothing ever replies — see this test's header
+    // comment), so the gap at seq 1 is never actually closed: next_seq_
+    // stays put rather than silently skipping ahead once retries run out.
+    // This is the "leaving the gap for a later packet/poll to retry"
+    // behavior include/net/multicast_receiver.hpp's resolve_gaps() comment
+    // documents — asserted directly here, not just implied by requests
+    // having been sent at all.
+    CHECK(receiver->next_seq() == 1);
 }
