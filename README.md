@@ -137,6 +137,14 @@ repo.
       (`LadderBook`-backed, the same default production now uses), not
       just decode-in-isolation — 4.6M+ executions across seed runs, clean, no
       crashes found so far; see [fuzz/README.md](fuzz/README.md)
+- [x] Differential fuzzing of `OrderBook` vs. `LadderBook`
+      (`fuzz/fuzz_differential.cpp`): the same decoded message stream drives
+      both book implementations side by side every CI run, and any
+      disagreement in their observable state (best bid/ask, open order
+      count, level counts) is a bug by construction — no hand-written
+      oracle — while a per-locate guard tells that apart from the two
+      books' documented, intentional price-window/grid acceptance
+      differences (see [fuzz/README.md](fuzz/README.md#differential-fuzzing-orderbook-vs-ladderbook-fuzz_differentialcpp))
 - [x] Measured line/branch coverage, not just a test count: a dedicated CI
       job builds `include/` + `src/` with `--coverage` (gcc), runs the full
       112-test suite, and captures/filters the result with `lcov` — the

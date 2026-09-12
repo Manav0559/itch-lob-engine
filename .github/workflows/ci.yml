@@ -410,3 +410,67 @@ jobs:
       # this CI job doesn't need).
       - name: Fuzz ITCH parser for 60s
         run: fuzz/build_and_run.sh 60
+
+  fuzz-differential-smoke:
+    name: differential fuzz smoke test (OrderBook vs LadderBook)
+    runs-on: ubuntu-latest
+
+    # Same scoping reasoning as build-test's and coverage's job-level
+    # `permissions` above: only the "Record differential fuzz history"
+    # step below (push-to-main only) ever uses write access, to commit
+    # fuzz/differential_history.csv back — the file dashboard/index.html's
+    # new differential-fuzzer section charts. GITHUB_TOKEN is forced
+    # read-only on pull_request runs regardless of this block.
+    permissions:
+      contents: write
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      # Bounded (60s) libFuzzer run replaying the same decoded message
+      # stream into book::OrderBook and book::LadderBook side by side (see
+      # fuzz/fuzz_differential.cpp) — a class of bug fuzz-smoke above
+      # structurally cannot see, since that harness only ever drives one
+      # book. Same hard-fail-no-retry reasoning as fuzz-smoke: a state
+      # divergence found here means the two book implementations that
+      # replay/replay_threaded's --map flag treats as interchangeable have
+      # actually disagreed, which is a real bug, not noise. Linux-only for
+      # the same reason as fuzz-smoke (system clang++ on ubuntu-latest
+      # already bundles libclang_rt.fuzzer).
+      - name: Differential-fuzz OrderBook vs LadderBook for 60s
+        run: fuzz/build_and_run_differential.sh 60
+
+      # Push-to-main only, same reasoning as build-test's "Record and
+      # commit benchmark history": a PR from an unmerged branch shouldn't
+      # get to append a row for numbers that never merged, and
+      # GITHUB_TOKEN is forced read-only on pull_request runs regardless.
+      # fuzz/differential_last_run.csv (gitignored) was just written by the
+      # step above at process exit — record_differential_history.py turns
+      # it into one durable row, never re-measuring anything itself.
+      - name: Record differential fuzz history
+        if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          python3 fuzz/record_differential_history.py --duration-s 60
+
+          git add fuzz/differential_history.csv
+          if git diff --staged --quiet; then
+            echo "fuzz/differential_history.csv unchanged, nothing to commit"
+            exit 0
+          fi
+          git commit -m "fuzz: record differential-fuzz history for ${GITHUB_SHA::12}"
+          for i in 1 2 3; do
+            git rebase --abort 2>/dev/null || true
+            if git pull --rebase origin main && git push origin HEAD:main; then
+              exit 0
+            fi
+            echo "push attempt $i failed (likely racing another job's push); retrying"
+            sleep $((RANDOM % 5 + 1))
+          done
+          git rebase --abort 2>/dev/null || true
+          echo "failed to push fuzz/differential_history.csv after 3 attempts"
+          exit 1
