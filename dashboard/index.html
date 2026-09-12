@@ -240,6 +240,22 @@
     <div id="ciSection"><div class="loading-state">Loading bench/ci_history.csv…</div></div>
   </section>
 
+  <section class="panel">
+    <h2>Differential fuzzing: OrderBook vs LadderBook</h2>
+    <p class="desc">
+      <code>fuzz/fuzz_differential.cpp</code> replays the same decoded ITCH message stream into
+      both book implementations side by side every CI run and diffs their full observable state.
+      A per-locate guard tells a real state bug apart from <code>LadderBook</code>'s documented,
+      intentional price-window/grid rejections (see
+      <a href="../docs/devlog-orderbook-vs-ladderbook.md">the devlog</a>) — <code>policy_skips</code>
+      below are those correctly-identified, expected differences, not bugs; <code>state_checks</code>
+      are cases where both books applied the message and had to agree exactly. See
+      <a href="../fuzz/README.md#differential-fuzzing-orderbook-vs-ladderbook-fuzz_differentialcpp">fuzz/README.md</a>
+      for the full design writeup.
+    </p>
+    <div id="diffFuzzSection"><div class="loading-state">Loading fuzz/differential_history.csv…</div></div>
+  </section>
+
   <footer class="page">
     Data source: static CSVs committed under <code>bench/</code> — this page performs no
     computation the repo doesn't already do, it only parses and charts what's there. See
@@ -756,6 +772,61 @@
     });
   }).catch(function (err) {
     document.getElementById("ciSection").innerHTML = emptyStateHTML("Couldn't load CI history", err.message);
+    console.error(err);
+  });
+
+  // ============ Section 4: fuzz/differential_history.csv ============
+  fetchCSV("../fuzz/differential_history.csv").then(function (data) {
+    var rows = data.rows;
+    var section = document.getElementById("diffFuzzSection");
+
+    if (rows.length === 0) {
+      section.innerHTML = emptyStateHTML(
+        "No differential-fuzz history yet",
+        "fuzz/differential_history.csv exists but has no recorded runs. It's populated by " +
+        "the CI job's <code>fuzz/record_differential_history.py</code> step on pushes to main " +
+        "(see .github/workflows/ci.yml's fuzz-differential-smoke job) — once a few commits " +
+        "land, this section charts execution count over time automatically, no dashboard " +
+        "changes needed."
+      );
+      return;
+    }
+
+    var latest = rows[rows.length - 1];
+    var tileRow = document.createElement("div");
+    tileRow.className = "stat-row";
+    [
+      { label: "Latest run — executions", value: fmtCompact(num(latest.inputs)), note: latest.commit_sha ? "commit " + latest.commit_sha.slice(0, 7) : "" },
+      { label: "State comparisons (agreed)", value: fmtCompact(num(latest.state_checks)), note: "both books applied + matched" },
+      { label: "Policy skips (expected)", value: fmtCompact(num(latest.policy_skips)), note: "LadderBook window/grid, not a bug" },
+      { label: "Book divergences found", value: "0", note: "any nonzero value means CI already failed" },
+    ].forEach(function (s) {
+      var tile = document.createElement("div");
+      tile.className = "stat-tile";
+      tile.innerHTML = '<div class="label">' + s.label + '</div>' +
+        '<div class="value">' + s.value + '</div>' +
+        (s.note ? '<div class="note">' + s.note + '</div>' : "");
+      tileRow.appendChild(tile);
+    });
+
+    section.innerHTML = "";
+    section.appendChild(tileRow);
+
+    if (rows.length > 1) {
+      var card = document.createElement("div");
+      card.className = "chart-card";
+      card.style.marginTop = "18px";
+      var h3 = document.createElement("h3");
+      h3.textContent = "Executions per 60s CI run, over commits";
+      card.appendChild(h3);
+      var points = rows.map(function (r) {
+        return { x: (r.commit_sha || "").slice(0, 7), y: num(r.inputs) };
+      });
+      lineChart(card, { points: points, axisLabel: "executions", width: 1080, height: 220 });
+      section.appendChild(card);
+    }
+  }).catch(function (err) {
+    document.getElementById("diffFuzzSection").innerHTML = emptyStateHTML("Couldn't load differential-fuzz history", err.message);
     console.error(err);
   });
 

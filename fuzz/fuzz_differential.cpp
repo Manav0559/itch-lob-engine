@@ -66,6 +66,25 @@ void print_summary() {
                  static_cast<unsigned long long>(g_inputs_seen),
                  static_cast<unsigned long long>(g_state_checks),
                  static_cast<unsigned long long>(g_policy_skips));
+
+    // Same three numbers, machine-readable, for
+    // record_differential_history.py to pick up in CI and append to
+    // fuzz/differential_history.csv (which dashboard/index.html charts) --
+    // the dashboard's own rule is it never computes a number the repo
+    // doesn't already produce, so this is that number's only source, not a
+    // duplicate. Written relative to the process's working directory, which
+    // is the repo root both when build_and_run_differential.sh invokes this
+    // binary locally and when the CI step runs it (default
+    // working-directory). Best-effort: a write failure here (e.g. a
+    // read-only sandbox) must never take down the fuzz run itself, so it's
+    // silently skipped rather than aborting.
+    if (FILE* f = std::fopen("fuzz/differential_last_run.csv", "w")) {
+        std::fprintf(f, "inputs,state_checks,policy_skips\n%llu,%llu,%llu\n",
+                     static_cast<unsigned long long>(g_inputs_seen),
+                     static_cast<unsigned long long>(g_state_checks),
+                     static_cast<unsigned long long>(g_policy_skips));
+        std::fclose(f);
+    }
 }
 
 std::string quote_str(const std::optional<book::Quote>& q) {
