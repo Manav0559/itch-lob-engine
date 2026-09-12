@@ -410,3 +410,22 @@ jobs:
       # this CI job doesn't need).
       - name: Fuzz ITCH parser for 60s
         run: fuzz/build_and_run.sh 60
+
+  fuzz-differential-smoke:
+    name: differential fuzz smoke test (OrderBook vs LadderBook)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # Bounded (60s) libFuzzer run replaying the same decoded message
+      # stream into book::OrderBook and book::LadderBook side by side (see
+      # fuzz/fuzz_differential.cpp) — a class of bug fuzz-smoke above
+      # structurally cannot see, since that harness only ever drives one
+      # book. Same hard-fail-no-retry reasoning as fuzz-smoke: a state
+      # divergence found here means the two book implementations that
+      # replay/replay_threaded's --map flag treats as interchangeable have
+      # actually disagreed, which is a real bug, not noise. Linux-only for
+      # the same reason as fuzz-smoke (system clang++ on ubuntu-latest
+      # already bundles libclang_rt.fuzzer).
+      - name: Differential-fuzz OrderBook vs LadderBook for 60s
+        run: fuzz/build_and_run_differential.sh 60

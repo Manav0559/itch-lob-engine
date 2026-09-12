@@ -1,5 +1,7 @@
 fuzz_parser
 fuzz_parser.dSYM/
+fuzz_differential
+fuzz_differential.dSYM/
 generate_corpus
 findings/
 crash-*
