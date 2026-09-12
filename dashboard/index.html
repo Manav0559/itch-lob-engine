@@ -7,56 +7,65 @@
 <style>
   :root {
     color-scheme: light;
-    --page:           #f9f9f7;
-    --surface-1:      #fcfcfb;
-    --surface-2:      #f3f2ef;
-    --text-primary:   #0b0b0b;
-    --text-secondary: #52514e;
-    --text-muted:     #898781;
-    --grid:           #e1e0d9;
-    --baseline:       #c3c2b7;
-    --border:         rgba(11,11,11,0.10);
-    --series-1:       #2a78d6; /* blue   */
-    --series-2:       #eb6834; /* orange */
-    --series-3:       #1baf7a; /* aqua   */
-    --good:           #0ca30c;
-    --critical:       #d03b3b;
+    --page:           #eef2f6;
+    --surface-1:      #ffffff;
+    --surface-2:      #e7edf2;
+    --text-primary:   #0a1420;
+    --text-secondary: #3f5468;
+    --text-muted:     #748693;
+    --grid:           #dfe6ec;
+    --baseline:       #c2ccd6;
+    --border:         rgba(10,32,48,0.12);
+    --series-1:       #0284c7; /* signal blue   */
+    --series-2:       #c2410c; /* signal amber  */
+    --series-3:       #047857; /* signal mint   */
+    --good:           #15803d;
+    --critical:       #b91c1c;
+    --accent:         #0891b2;
+    --accent-glow:    rgba(8,145,178,0.20);
+    --font-mono:      ui-monospace, "SF Mono", "Cascadia Mono", "JetBrains Mono", "Fira Code",
+                       Menlo, Consolas, "Roboto Mono", monospace;
+    --font-sans:      system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
   }
   @media (prefers-color-scheme: dark) {
     :root:not([data-theme="light"]) {
       color-scheme: dark;
-      --page:           #0d0d0d;
-      --surface-1:      #1a1a19;
-      --surface-2:      #202020;
-      --text-primary:   #ffffff;
-      --text-secondary: #c3c2b7;
-      --text-muted:     #898781;
-      --grid:           #2c2c2a;
-      --baseline:       #383835;
-      --border:         rgba(255,255,255,0.10);
-      --series-1:       #3987e5;
-      --series-2:       #d95926;
-      --series-3:       #199e70;
-      --good:           #0ca30c;
-      --critical:       #e66767;
+      --page:           #05080c;
+      --surface-1:      #0b131b;
+      --surface-2:      #101c26;
+      --text-primary:   #e6f1f7;
+      --text-secondary: #93aebd;
+      --text-muted:     #5a7385;
+      --grid:           #16222d;
+      --baseline:       #29404f;
+      --border:         rgba(125,211,252,0.14);
+      --series-1:       #38bdf8;
+      --series-2:       #fb923c;
+      --series-3:       #34d399;
+      --good:           #4ade80;
+      --critical:       #f87171;
+      --accent:         #22d3ee;
+      --accent-glow:    rgba(34,211,238,0.28);
     }
   }
   :root[data-theme="dark"] {
     color-scheme: dark;
-    --page:           #0d0d0d;
-    --surface-1:      #1a1a19;
-    --surface-2:      #202020;
-    --text-primary:   #ffffff;
-    --text-secondary: #c3c2b7;
-    --text-muted:     #898781;
-    --grid:           #2c2c2a;
-    --baseline:       #383835;
-    --border:         rgba(255,255,255,0.10);
-    --series-1:       #3987e5;
-    --series-2:       #d95926;
-    --series-3:       #199e70;
-    --good:           #0ca30c;
-    --critical:       #e66767;
+    --page:           #05080c;
+    --surface-1:      #0b131b;
+    --surface-2:      #101c26;
+    --text-primary:   #e6f1f7;
+    --text-secondary: #93aebd;
+    --text-muted:     #5a7385;
+    --grid:           #16222d;
+    --baseline:       #29404f;
+    --border:         rgba(125,211,252,0.14);
+    --series-1:       #38bdf8;
+    --series-2:       #fb923c;
+    --series-3:       #34d399;
+    --good:           #4ade80;
+    --critical:       #f87171;
+    --accent:         #22d3ee;
+    --accent-glow:    rgba(34,211,238,0.28);
   }
 
   * { box-sizing: border-box; }
@@ -64,22 +73,71 @@
     margin: 0; padding: 0;
     background: var(--page);
     color: var(--text-primary);
-    font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+    font-family: var(--font-sans);
   }
-  body { padding: 24px 20px 64px; }
-  .wrap { max-width: 1180px; margin: 0 auto; }
+  body {
+    padding: 24px 20px 64px;
+    /* Faint blueprint/graph-paper grid — a "high-tech" texture cue that stays
+       out of the way of actual data: 1px lines, near-invisible opacity,
+       fixed so it doesn't scroll-jitter against the real content. */
+    background-image:
+      linear-gradient(var(--grid) 1px, transparent 1px),
+      linear-gradient(90deg, var(--grid) 1px, transparent 1px);
+    background-size: 34px 34px;
+    background-attachment: fixed;
+  }
+  .wrap { max-width: 1180px; margin: 0 auto; position: relative; }
+  /* Top accent rule: a single hairline gradient, not a banner — the one
+     deliberately decorative touch on the page, kept to a 2px strip. */
+  .wrap::before {
+    content: ""; position: absolute; top: -24px; left: -20px; right: -20px; height: 2px;
+    background: linear-gradient(90deg, transparent, var(--accent) 15%, var(--accent) 85%, transparent);
+    opacity: 0.55;
+  }
 
   header.page { display: flex; justify-content: space-between; align-items: flex-start; gap: 16px; margin-bottom: 6px; flex-wrap: wrap; }
-  h1 { font-size: 22px; margin: 0 0 6px; letter-spacing: -0.01em; }
+  h1 {
+    font-family: var(--font-mono); font-size: 21px; font-weight: 600;
+    margin: 0 0 8px; letter-spacing: -0.01em; display: flex; align-items: center; gap: 10px;
+    flex-wrap: wrap; row-gap: 4px;
+  }
+  @media (max-width: 480px) { h1 { font-size: 17px; } }
+  .prompt { color: var(--accent); }
+  .live-dot {
+    width: 8px; height: 8px; border-radius: 50%; background: var(--good); flex: none;
+    box-shadow: 0 0 0 0 var(--good);
+    animation: live-pulse 2.2s ease-out infinite;
+  }
+  .live-dot + .live-label {
+    font-family: var(--font-mono); font-size: 10.5px; font-weight: 600; letter-spacing: 0.06em;
+    color: var(--text-muted); text-transform: uppercase; margin-left: -4px;
+  }
+  @keyframes live-pulse {
+    0%   { box-shadow: 0 0 0 0 color-mix(in srgb, var(--good) 55%, transparent); }
+    70%  { box-shadow: 0 0 0 7px transparent; }
+    100% { box-shadow: 0 0 0 0 transparent; }
+  }
+  @media (prefers-reduced-motion: reduce) { .live-dot { animation: none; } }
   .tagline { color: var(--text-primary); font-size: 14.5px; margin: 0 0 8px; max-width: 72ch; line-height: 1.5; font-weight: 500; }
   .sub { color: var(--text-secondary); font-size: 13px; margin: 0; max-width: 72ch; line-height: 1.5; }
-  code { background: var(--surface-2); border: 1px solid var(--border); border-radius: 4px; padding: 1px 5px; font-size: 0.92em; }
+  code {
+    font-family: var(--font-mono);
+    background: var(--surface-2); border: 1px solid var(--border); border-radius: 4px;
+    padding: 1px 5px; font-size: 0.92em; color: var(--accent);
+  }
 
   .theme-toggle {
+    font-family: var(--font-mono);
     border: 1px solid var(--border); background: var(--surface-1); color: var(--text-secondary);
-    border-radius: 999px; padding: 6px 12px; font-size: 12.5px; cursor: pointer; white-space: nowrap;
+    border-radius: 999px; padding: 6px 14px; font-size: 12px; cursor: pointer; white-space: nowrap;
+    transition: color 0.18s ease, border-color 0.18s ease, box-shadow 0.18s ease;
   }
-  .theme-toggle:hover { color: var(--text-primary); }
+  .theme-toggle:hover {
+    color: var(--accent); border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-glow);
+  }
+  .theme-toggle:focus-visible, button:focus-visible, a:focus-visible {
+    outline: 2px solid var(--accent); outline-offset: 2px;
+  }
 
   .banner {
     display: none;
@@ -92,52 +150,81 @@
 
   .stat-row { display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); gap: 12px; margin: 20px 0 8px; }
   .stat-tile {
-    background: var(--surface-1); border: 1px solid var(--border); border-radius: 10px;
-    padding: 14px 16px;
+    background: var(--surface-1); border: 1px solid var(--border); border-left: 3px solid var(--accent);
+    border-radius: 8px; padding: 14px 16px;
+    transition: transform 0.18s ease, box-shadow 0.18s ease, border-color 0.18s ease;
   }
-  .stat-tile .label { font-size: 11.5px; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.04em; margin-bottom: 6px; }
-  .stat-tile .value { font-size: 26px; font-weight: 600; line-height: 1.15; }
+  .stat-tile:hover {
+    transform: translateY(-1px);
+    box-shadow: 0 0 0 1px var(--accent-glow), 0 8px 20px -12px var(--accent-glow);
+  }
+  .stat-tile .label { font-size: 11px; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.06em; margin-bottom: 6px; font-family: var(--font-mono); }
+  .stat-tile .value { font-family: var(--font-mono); font-size: 26px; font-weight: 600; line-height: 1.15; font-variant-numeric: tabular-nums; }
   .stat-tile .value .unit { font-size: 14px; font-weight: 500; color: var(--text-secondary); margin-left: 3px; }
   .stat-tile .note { font-size: 12px; color: var(--text-muted); margin-top: 4px; }
 
   section.panel {
-    background: var(--surface-1); border: 1px solid var(--border); border-radius: 12px;
+    background: var(--surface-1); border: 1px solid var(--border); border-radius: 10px;
     padding: 20px 22px 22px; margin-top: 22px;
+    transition: border-color 0.2s ease;
   }
-  section.panel h2 { font-size: 16px; margin: 0 0 2px; }
+  section.panel:hover { border-color: var(--accent-glow); }
+  section.panel .eyebrow {
+    font-family: var(--font-mono); font-size: 10.5px; font-weight: 600; letter-spacing: 0.08em;
+    text-transform: uppercase; color: var(--accent); margin: 0 0 6px;
+  }
+  section.panel h2 { font-size: 16px; margin: 0 0 2px; letter-spacing: -0.005em; }
   section.panel .desc { font-size: 12.5px; color: var(--text-secondary); margin: 0 0 16px; line-height: 1.5; max-width: 90ch; }
 
   .chart-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 18px; }
   @media (max-width: 900px) { .chart-grid { grid-template-columns: 1fr; } }
   .chart-grid.two { grid-template-columns: repeat(2, 1fr); }
 
-  .chart-card { min-width: 0; }
-  .chart-card h3 { font-size: 13px; font-weight: 600; margin: 0 0 8px; color: var(--text-primary); }
+  .chart-card {
+    min-width: 0; background: var(--surface-2); border: 1px solid var(--border);
+    border-radius: 8px; padding: 14px 16px 8px;
+  }
+  .chart-card h3 {
+    font-family: var(--font-mono); font-size: 11.5px; font-weight: 600; margin: 0 0 10px;
+    color: var(--text-secondary); text-transform: uppercase; letter-spacing: 0.05em;
+  }
   .chart-card svg { width: 100%; height: auto; display: block; overflow: visible; }
 
-  .legend { display: flex; flex-wrap: wrap; gap: 14px; margin: 10px 2px 0; font-size: 12px; color: var(--text-secondary); }
+  .legend { display: flex; flex-wrap: wrap; gap: 14px; margin: 10px 2px 0; font-size: 12px; color: var(--text-secondary); font-family: var(--font-mono); }
   .legend .item { display: flex; align-items: center; gap: 6px; }
-  .legend .swatch { width: 10px; height: 10px; border-radius: 2px; flex: none; }
+  .legend .swatch { width: 10px; height: 10px; border-radius: 2px; flex: none; transition: opacity 0.15s ease; }
+  /* Clickable series legend: toggles that series' bars across every chart on
+     the page (not just the one it's attached to) — see toggleSeries() in the
+     script. Only legends built with a `toggle: true` series list get this;
+     the plain message-type glossary legend stays inert (no cursor/click). */
+  .legend .item.toggle { cursor: pointer; user-select: none; padding: 2px 4px; margin: -2px -4px; border-radius: 4px; transition: background 0.15s ease; }
+  .legend .item.toggle:hover { background: var(--surface-2); }
+  .legend .item.toggle:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+  .legend .item.toggle.muted { color: var(--text-muted); }
+  .legend .item.toggle.muted .swatch { opacity: 0.25; }
+  .legend .item.toggle .hint { font-size: 10px; color: var(--text-muted); margin-left: 1px; }
 
-  .bar-rect { transition: opacity 0.1s ease; }
-  .bar-rect:hover { opacity: 0.78; }
+  .bar-rect { transition: opacity 0.12s ease, filter 0.12s ease; cursor: pointer; }
+  .bar-rect:hover { opacity: 0.85; filter: drop-shadow(0 0 6px var(--accent-glow)); }
 
   .tooltip {
     position: fixed; pointer-events: none; z-index: 50;
+    font-family: var(--font-mono);
     background: var(--text-primary); color: var(--page);
     font-size: 11.5px; line-height: 1.45; padding: 6px 9px; border-radius: 6px;
     max-width: 220px; opacity: 0; transform: translate(-50%, -100%);
     transition: opacity 0.08s ease; white-space: nowrap;
+    box-shadow: 0 4px 16px -4px rgba(0,0,0,0.3);
   }
   .tooltip.show { opacity: 0.96; }
   .tooltip b { font-weight: 700; }
 
-  .axis-tick, .msg-tick { fill: var(--text-muted); font-size: 10.5px; }
+  .axis-tick, .msg-tick { fill: var(--text-muted); font-size: 10.5px; font-family: var(--font-mono); }
   .gridline { stroke: var(--grid); stroke-width: 1; }
   .baseline-axis { stroke: var(--baseline); stroke-width: 1; }
   .threshold-line { stroke: var(--critical); stroke-width: 1.5; stroke-dasharray: 4 3; }
 
-  table.data-table { width: 100%; border-collapse: collapse; font-size: 12.5px; }
+  table.data-table { width: 100%; border-collapse: collapse; font-size: 12.5px; font-family: var(--font-mono); }
   table.data-table th, table.data-table td {
     text-align: right; padding: 7px 10px; border-bottom: 1px solid var(--border);
     font-variant-numeric: tabular-nums;
@@ -145,24 +232,52 @@
   table.data-table th:first-child, table.data-table td:first-child { text-align: left; font-variant-numeric: normal; }
   table.data-table th { color: var(--text-muted); font-weight: 600; font-size: 11px; text-transform: uppercase; letter-spacing: 0.03em; }
   table.data-table tbody tr:last-child td { border-bottom: none; }
+  table.data-table tbody tr:hover td { background: var(--surface-1); }
+  table.data-table th.sortable { cursor: pointer; user-select: none; transition: color 0.15s ease; }
+  table.data-table th.sortable:hover { color: var(--accent); }
+  table.data-table th.sortable:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+  table.data-table th .sort-arrow { color: var(--accent); margin-left: 3px; display: inline-block; width: 8px; }
+
+  .refresh-btn {
+    font-family: var(--font-mono);
+    border: 1px solid var(--border); background: var(--surface-1); color: var(--text-secondary);
+    border-radius: 999px; padding: 6px 14px; font-size: 12px; cursor: pointer; white-space: nowrap;
+    transition: color 0.18s ease, border-color 0.18s ease, box-shadow 0.18s ease, transform 0.15s ease;
+    display: inline-flex; align-items: center; gap: 6px;
+  }
+  .refresh-btn:hover { color: var(--accent); border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-glow); }
+  .refresh-btn:active { transform: scale(0.97); }
+  .refresh-btn .spin { display: inline-block; transition: transform 0.5s ease; }
+  .refresh-btn.spinning .spin { animation: spin-once 0.6s linear; }
+  @keyframes spin-once { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
+  @media (prefers-reduced-motion: reduce) { .refresh-btn.spinning .spin { animation: none; } }
+  .header-actions { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+  .last-updated { font-family: var(--font-mono); font-size: 11px; color: var(--text-muted); white-space: nowrap; }
 
   .empty-state {
     padding: 28px 20px; text-align: center; color: var(--text-muted); font-size: 13px;
-    border: 1px dashed var(--border); border-radius: 10px; background: var(--surface-2);
+    border: 1px dashed var(--border); border-radius: 8px; background: var(--surface-1);
+    font-family: var(--font-mono);
   }
-  .empty-state .big { font-size: 26px; margin-bottom: 6px; }
+  .empty-state .big { font-size: 26px; margin-bottom: 6px; color: var(--accent); }
 
   .loading-state {
     padding: 28px 20px; text-align: center; color: var(--text-muted); font-size: 12.5px;
-    border: 1px solid var(--border); border-radius: 10px; background: var(--surface-2);
+    font-family: var(--font-mono);
+    border: 1px solid var(--border); border-radius: 8px; background: var(--surface-1);
     animation: pulse 1.3s ease-in-out infinite;
   }
   @keyframes pulse { 0%, 100% { opacity: 0.55; } 50% { opacity: 1; } }
+  @media (prefers-reduced-motion: reduce) { .loading-state { animation: none; opacity: 0.8; } }
 
-  .axis-label { fill: var(--text-muted); font-size: 10.5px; }
+  .axis-label { fill: var(--text-muted); font-size: 10.5px; font-family: var(--font-mono); }
 
-  footer.page { margin-top: 30px; padding-top: 16px; border-top: 1px solid var(--border); color: var(--text-muted); font-size: 12px; line-height: 1.6; }
-  footer.page a { color: inherit; }
+  footer.page {
+    margin-top: 30px; padding-top: 16px; border-top: 1px solid var(--border);
+    color: var(--text-muted); font-size: 12px; line-height: 1.6; font-family: var(--font-mono);
+  }
+  footer.page a { color: var(--accent); }
+  footer.page a:hover { text-decoration: underline; }
 </style>
 </head>
 <body>
@@ -170,7 +285,7 @@
 
   <header class="page">
     <div>
-      <h1>itch-lob-engine — bench dashboard</h1>
+      <h1><span class="prompt">$</span> itch-lob-engine — bench dashboard <span class="live-dot" aria-hidden="true"></span><span class="live-label">live</span></h1>
       <p class="tagline">
         A C++20 engine that parses the real NASDAQ TotalView-ITCH 5.0 binary protocol and
         reconstructs the full limit order book per symbol — this page charts its performance
@@ -183,7 +298,13 @@
         (and <code>./build/bench_threaded</code> for the threaded numbers), then reload this page.
       </p>
     </div>
-    <button class="theme-toggle" id="themeToggle" type="button">Toggle theme</button>
+    <div class="header-actions">
+      <span class="last-updated" id="lastUpdated"></span>
+      <button class="refresh-btn" id="refreshBtn" type="button" title="Re-fetch the CSVs and redraw every chart">
+        <span class="spin" aria-hidden="true">&#8635;</span> Refresh
+      </button>
+      <button class="theme-toggle" id="themeToggle" type="button">Toggle theme</button>
+    </div>
   </header>
 
   <div class="banner" id="fetchBanner"></div>
@@ -193,6 +314,7 @@
   </div>
 
   <section class="panel">
+    <p class="eyebrow">// 01 · latency</p>
     <h2>OrderBook vs LadderBook — per-message latency</h2>
     <p class="desc">
       p50 / p99 / p99.9 nanoseconds per message type, from a fixed-seed 2.2M-message synthetic
@@ -207,6 +329,7 @@
   </section>
 
   <section class="panel">
+    <p class="eyebrow">// 02 · throughput</p>
     <h2>Threaded vs single-threaded throughput</h2>
     <p class="desc">
       End-to-end messages/sec for the same 2.2M-message session across three replay paths —
@@ -229,6 +352,7 @@
   </section>
 
   <section class="panel">
+    <p class="eyebrow">// 03 · regression watch</p>
     <h2>CI performance ratio over commits</h2>
     <p class="desc">
       <code>LadderBook</code> p50 ÷ <code>OrderBook</code> p50, averaged across message types,
@@ -241,6 +365,7 @@
   </section>
 
   <section class="panel">
+    <p class="eyebrow">// 04 · adversarial testing</p>
     <h2>Differential fuzzing: OrderBook vs LadderBook</h2>
     <p class="desc">
       <code>fuzz/fuzz_differential.cpp</code> replays the same decoded ITCH message stream into
@@ -283,6 +408,25 @@
     root.setAttribute("data-theme", next);
     localStorage.setItem("dashboard-theme", next);
   });
+
+  // ---------- cross-chart series toggle ----------
+  // Clicking a legend swatch hides that series' bars in EVERY grouped-bar
+  // chart on the page that has one (e.g. all three latency panels share one
+  // OrderBook/LadderBook legend) -- state lives here, not per-chart, since
+  // the whole point is one click affecting charts the legend isn't even
+  // physically next to.
+  var hiddenSeries = {};
+  function isSeriesHidden(name) { return !!hiddenSeries[name]; }
+  function toggleSeries(name) {
+    hiddenSeries[name] = !hiddenSeries[name];
+    document.querySelectorAll('.bar-rect[data-series="' + cssEscape(name) + '"]').forEach(function (el) {
+      el.style.display = hiddenSeries[name] ? "none" : "";
+    });
+    document.querySelectorAll('.legend .item.toggle[data-series="' + cssEscape(name) + '"]').forEach(function (el) {
+      el.classList.toggle("muted", hiddenSeries[name]);
+    });
+  }
+  function cssEscape(s) { return window.CSS && CSS.escape ? CSS.escape(s) : s.replace(/["\\]/g, "\\$&"); }
 
   // ---------- tiny CSV parser (no quoted commas in these files) ----------
   function parseCSV(text) {
@@ -406,8 +550,10 @@
         var rect = svgEl("path", {
           class: "bar-rect",
           d: roundedTopRectPath(x, yTop, barW, h, r),
-          fill: s.color
+          fill: s.color,
+          "data-series": s.name
         });
+        if (isSeriesHidden(s.name)) rect.style.display = "none";
         rect.addEventListener("mousemove", function (evt) {
           showTooltip(evt, "<b>" + s.name + "</b> — " + categoryLabels[ci] + "<br>" + fmtInt(v) + " " + unit);
         });
@@ -436,11 +582,20 @@
     ].join(" ");
   }
 
+  // Every legendFor() caller is a bar-series legend, so every item here is
+  // click-to-toggle (see toggleSeries above) -- there's no separate "static"
+  // legend variant to branch on; the one non-series glossary in this page
+  // (message-type key: A=Add, E=Execute...) is built by hand, not through
+  // this function, and stays inert on purpose.
   function legendFor(container, series) {
     container.innerHTML = "";
     series.forEach(function (s) {
       var item = document.createElement("div");
-      item.className = "item";
+      item.className = "item toggle" + (isSeriesHidden(s.name) ? " muted" : "");
+      item.setAttribute("data-series", s.name);
+      item.setAttribute("role", "button");
+      item.setAttribute("tabindex", "0");
+      item.title = "Click to " + (isSeriesHidden(s.name) ? "show" : "hide") + " " + s.name + " everywhere on this page";
       var sw = document.createElement("span");
       sw.className = "swatch";
       sw.style.background = s.color;
@@ -448,8 +603,88 @@
       var label = document.createElement("span");
       label.textContent = s.name;
       item.appendChild(label);
+      var activate = function () { toggleSeries(s.name); };
+      item.addEventListener("click", activate);
+      item.addEventListener("keydown", function (evt) {
+        if (evt.key === "Enter" || evt.key === " ") { evt.preventDefault(); activate(); }
+      });
       container.appendChild(item);
     });
+  }
+
+  // ---------- sortable SPSC round-trip latency table ----------
+  var spscSortState = { key: null, dir: 1 };
+  function renderSpscTable(spsc) {
+    var spscDiv = document.getElementById("spscTable");
+    spscDiv.innerHTML = "";
+    if (spsc.length === 0) {
+      spscDiv.innerHTML = emptyStateHTML("No SPSC data", "No spsc_roundtrip rows found.");
+      return;
+    }
+    var columns = [
+      { key: "path", label: "Path", numeric: false },
+      { key: "p50_ns", label: "p50", numeric: true },
+      { key: "p99_ns", label: "p99", numeric: true },
+      { key: "p999_ns", label: "p99.9", numeric: true },
+      { key: "min_ns", label: "min", numeric: true }
+    ];
+    var rows = spsc.map(function (r) {
+      return {
+        path: r.path.replace("envelope_roundtrip_", "").replace(/_/g, " "),
+        p50_ns: num(r.p50_ns), p99_ns: num(r.p99_ns), p999_ns: num(r.p999_ns), min_ns: num(r.min_ns)
+      };
+    });
+    if (spscSortState.key) {
+      var k = spscSortState.key, dir = spscSortState.dir;
+      rows.sort(function (a, b) {
+        return typeof a[k] === "string" ? a[k].localeCompare(b[k]) * dir : (a[k] - b[k]) * dir;
+      });
+    }
+
+    var table = document.createElement("table");
+    table.className = "data-table";
+    var thead = document.createElement("thead");
+    var trh = document.createElement("tr");
+    columns.forEach(function (col) {
+      var th = document.createElement("th");
+      th.className = "sortable";
+      th.tabIndex = 0;
+      var active = spscSortState.key === col.key;
+      th.setAttribute("aria-sort", active ? (spscSortState.dir === 1 ? "ascending" : "descending") : "none");
+      th.textContent = col.label;
+      if (active) {
+        var arrow = document.createElement("span");
+        arrow.className = "sort-arrow";
+        arrow.textContent = spscSortState.dir === 1 ? "↑" : "↓";
+        th.appendChild(arrow);
+      }
+      var activate = function () {
+        if (spscSortState.key === col.key) spscSortState.dir *= -1;
+        else { spscSortState.key = col.key; spscSortState.dir = 1; }
+        renderSpscTable(spsc);
+      };
+      th.addEventListener("click", activate);
+      th.addEventListener("keydown", function (evt) {
+        if (evt.key === "Enter" || evt.key === " ") { evt.preventDefault(); activate(); }
+      });
+      trh.appendChild(th);
+    });
+    thead.appendChild(trh);
+    table.appendChild(thead);
+
+    var tbody = document.createElement("tbody");
+    rows.forEach(function (r) {
+      var tr = document.createElement("tr");
+      tr.innerHTML =
+        "<td>" + r.path + "</td>" +
+        "<td>" + fmtInt(r.p50_ns) + "</td>" +
+        "<td>" + fmtInt(r.p99_ns) + "</td>" +
+        "<td>" + fmtInt(r.p999_ns) + "</td>" +
+        "<td>" + fmtInt(r.min_ns) + "</td>";
+      tbody.appendChild(tr);
+    });
+    table.appendChild(tbody);
+    spscDiv.appendChild(table);
   }
 
   // ---------- line chart (for CI ratio) ----------
@@ -539,6 +774,7 @@
   var MSG_NAMES = { A: "Add", E: "Execute", C: "Execute(px)", X: "Cancel", D: "Delete", U: "Replace" };
 
   // ============ Section 1: results.csv ============
+  function loadLatencySection() {
   fetchCSV("../bench/results.csv").then(function (data) {
     var rows = data.rows;
     if (rows.length === 0) throw new Error("bench/results.csv is empty");
@@ -624,13 +860,16 @@
         note: "lower = LadderBook further ahead · CI budget fails above 0.90"
       });
     }
-    addStatTiles(stats);
+    addStatTiles(stats, "latency");
   }).catch(function (err) {
     document.getElementById("latencyCharts").innerHTML = emptyStateHTML("No latency data", err.message);
     console.error(err);
   }).finally(statSourceSettled);
+  }
+  loadLatencySection();
 
   // ============ Section 2: results_threaded.csv ============
+  function loadThroughputSection() {
   fetchCSV("../bench/results_threaded.csv").then(function (data) {
     var rows = data.rows;
     var throughput = rows.filter(function (r) { return r.metric === "throughput"; });
@@ -676,44 +915,24 @@
             label: "Best threaded/single-threaded (best-of-3)",
             value: ratio.toFixed(2) + "×",
             note: fmtCompact(num(single.best_msgs_per_sec)) + " → " + fmtCompact(num(best.best_msgs_per_sec)) + " msgs/sec"
-          }]);
+          }], "throughput");
         }
       }
     } else {
       document.getElementById("throughputChart").innerHTML = emptyStateHTML("No throughput data", "bench/results_threaded.csv has no throughput rows.");
     }
 
-    var spscDiv = document.getElementById("spscTable");
-    spscDiv.innerHTML = "";
-    if (spsc.length > 0) {
-      var table = document.createElement("table");
-      table.className = "data-table";
-      table.innerHTML =
-        "<thead><tr><th>Path</th><th>p50</th><th>p99</th><th>p99.9</th><th>min</th></tr></thead>";
-      var tbody = document.createElement("tbody");
-      spsc.forEach(function (r) {
-        var tr = document.createElement("tr");
-        var label = r.path.replace("envelope_roundtrip_", "").replace(/_/g, " ");
-        tr.innerHTML =
-          "<td>" + label + "</td>" +
-          "<td>" + fmtInt(r.p50_ns) + "</td>" +
-          "<td>" + fmtInt(r.p99_ns) + "</td>" +
-          "<td>" + fmtInt(r.p999_ns) + "</td>" +
-          "<td>" + fmtInt(r.min_ns) + "</td>";
-        tbody.appendChild(tr);
-      });
-      table.appendChild(tbody);
-      spscDiv.appendChild(table);
-    } else {
-      spscDiv.innerHTML = emptyStateHTML("No SPSC data", "No spsc_roundtrip rows found.");
-    }
+    renderSpscTable(spsc);
   }).catch(function (err) {
     document.getElementById("throughputChart").innerHTML = emptyStateHTML("Couldn't load throughput data", err.message);
     document.getElementById("spscTable").innerHTML = "";
     console.error(err);
   }).finally(statSourceSettled);
+  }
+  loadThroughputSection();
 
   // ============ Section 3: ci_history.csv ============
+  function loadCiHistorySection() {
   fetchCSV("../bench/ci_history.csv").then(function (data) {
     var rows = data.rows;
     var ciSection = document.getElementById("ciSection");
@@ -774,8 +993,11 @@
     document.getElementById("ciSection").innerHTML = emptyStateHTML("Couldn't load CI history", err.message);
     console.error(err);
   });
+  }
+  loadCiHistorySection();
 
   // ============ Section 4: fuzz/differential_history.csv ============
+  function loadDiffFuzzSection() {
   fetchCSV("../fuzz/differential_history.csv").then(function (data) {
     var rows = data.rows;
     var section = document.getElementById("diffFuzzSection");
@@ -829,6 +1051,36 @@
     document.getElementById("diffFuzzSection").innerHTML = emptyStateHTML("Couldn't load differential-fuzz history", err.message);
     console.error(err);
   });
+  }
+  loadDiffFuzzSection();
+
+  // ---------- manual refresh + last-updated ----------
+  // Re-runs all four fetch-and-render chains in place -- same code path as
+  // first load, just callable again. Genuinely useful (not just decorative)
+  // because the CSVs this page reads are exactly the ones CI commits back to
+  // main after every push (see bench/CI_INTEGRATION.md and
+  // fuzz/record_differential_history.py) -- a viewer who lands here right
+  // after a new commit lands doesn't have to reload the page to see it.
+  var refreshBtn = document.getElementById("refreshBtn");
+  var lastUpdatedEl = document.getElementById("lastUpdated");
+  function refreshAll() {
+    loadLatencySection();
+    loadThroughputSection();
+    loadCiHistorySection();
+    loadDiffFuzzSection();
+    markUpdated();
+  }
+  function markUpdated() {
+    var now = new Date();
+    lastUpdatedEl.textContent = "updated " + now.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" });
+  }
+  refreshBtn.addEventListener("click", function () {
+    refreshAll();
+    refreshBtn.classList.remove("spinning");
+    void refreshBtn.offsetWidth; // restart the CSS animation on repeat clicks
+    refreshBtn.classList.add("spinning");
+  });
+  markUpdated();
 
   function fragmentFromHTML(html) {
     var div = document.createElement("div");
@@ -851,13 +1103,19 @@
     }
   }
 
-  function addStatTiles(stats) {
+  // `source` tags which loader produced these tiles ("latency" /
+  // "throughput") so a re-render (manual refresh) replaces that loader's own
+  // tiles in place instead of appending duplicates next to them every click
+  // -- each loader owns its slice of #statRow, not the whole row.
+  function addStatTiles(stats, source) {
     var row = document.getElementById("statRow");
     var placeholder = row.querySelector(".loading-state");
     if (placeholder) placeholder.remove();
+    row.querySelectorAll('.stat-tile[data-source="' + source + '"]').forEach(function (el) { el.remove(); });
     stats.forEach(function (s) {
       var tile = document.createElement("div");
       tile.className = "stat-tile";
+      tile.setAttribute("data-source", source);
       tile.innerHTML =
         '<div class="label">' + s.label + '</div>' +
         '<div class="value">' + s.value + '</div>' +
