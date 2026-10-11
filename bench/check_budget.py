@@ -19,7 +19,11 @@ import subprocess
 import sys
 from datetime import datetime, timezone
 
-MESSAGE_TYPES = ["A", "E", "C", "X", "D", "U"]
+# The hard gate compares the batch-timed "ALL" rows only: those are measured
+# the same way on every platform (one clock read per 1024-message batch, see
+# bench/bench_main.cpp). Per-type rows exist only on x86-64 (rdtsc per call)
+# and are recorded/drift-checked but never gated on.
+GATED_MESSAGE_TYPES = ["ALL"]
 
 DEFAULT_RESULTS = "bench/results.csv"
 DEFAULT_HISTORY = "bench/ci_history.csv"
@@ -36,9 +40,9 @@ def read_results(path):
             key = (row["book_type"], row["message_type"])
             rows[key] = {
                 "count": int(row["count"]),
-                "p50_ns": int(row["p50_ns"]),
-                "p99_ns": int(row["p99_ns"]),
-                "p999_ns": int(row["p999_ns"]),
+                "p50_ns": float(row["p50_ns"]),
+                "p99_ns": float(row["p99_ns"]),
+                "p999_ns": float(row["p999_ns"]),
             }
     return rows
 
@@ -77,14 +81,14 @@ def is_macos(os_label):
 
 
 def check_ratio(results, threshold):
-    """Hard check: LadderBook p50 must beat OrderBook p50 by `threshold`,
-    for every message type present in this run. Ratio-based on the SAME
+    """Hard check: LadderBook's batch-amortized p50 per-message cost must
+    beat OrderBook's by `threshold` (GATED_MESSAGE_TYPES rows only). Ratio-based on the SAME
     run/machine/moment, so it cancels out cross-run and cross-machine
     noise -- this is the check that is allowed to fail CI.
     """
     checked = []
     failures = []
-    for mtype in MESSAGE_TYPES:
+    for mtype in GATED_MESSAGE_TYPES:
         order = results.get(("OrderBook", mtype))
         ladder = results.get(("LadderBook", mtype))
         if order is None or ladder is None:
@@ -107,7 +111,7 @@ def check_drift(results, history, os_label, window, multiplier, min_history):
     warnings = []
     for (book_type, mtype), row in sorted(results.items()):
         past = [
-            int(h["p99_ns"]) for h in history
+            float(h["p99_ns"]) for h in history
             if h["os"] == os_label and h["book_type"] == book_type
             and h["message_type"] == mtype
         ]
@@ -134,7 +138,7 @@ def cmd_check(args):
           f"OrderBook p50 (hard fail) --")
     for mtype, order_p50, ladder_p50, ratio, limit in checked:
         status = "FAIL" if ladder_p50 >= limit else "ok"
-        print(f"  [{status}] {mtype}: order_p50={order_p50}ns ladder_p50={ladder_p50}ns "
+        print(f"  [{status}] {mtype}: order_p50={order_p50:.1f}ns ladder_p50={ladder_p50:.1f}ns "
               f"ratio={ratio:.2%} (limit < {args.ratio_threshold:.0%})")
     if not checked:
         print("  no matching OrderBook/LadderBook rows found in results.csv")
@@ -148,7 +152,7 @@ def cmd_check(args):
     if not warnings:
         print("  no drift warnings")
     for book_type, mtype, current, median, limit, n in warnings:
-        print(f"  WARNING: {book_type}/{mtype} p99={current}ns is {current / median:.2f}x its "
+        print(f"  WARNING: {book_type}/{mtype} p99={current:.1f}ns is {current / median:.2f}x its "
               f"{n}-run median ({median:.0f}ns), past warn threshold ({args.drift_multiplier:.1f}x)")
 
     if failures:
