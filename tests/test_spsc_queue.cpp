@@ -6,7 +6,7 @@
 
 using pipeline::SpscQueue;
 
-TEST_CASE("push/pop preserves FIFO order") {
+TEST_CASE("push/pop preserves FIFO order", "[spsc]") {
     SpscQueue<int, 8> q;
     REQUIRE(q.push(10));
     REQUIRE(q.push(20));
@@ -21,7 +21,7 @@ TEST_CASE("push/pop preserves FIFO order") {
     CHECK(v == 30);
 }
 
-TEST_CASE("push until full returns false without corrupting state") {
+TEST_CASE("push until full returns false without corrupting state", "[spsc]") {
     // Capacity 4 holds 3 live elements: one slot is always kept empty so
     // push()'s "next == head" full check can never collide with pop()'s
     // "head == tail" empty check on an all-full buffer.
@@ -42,7 +42,7 @@ TEST_CASE("push until full returns false without corrupting state") {
     CHECK_FALSE(q.pop(v));    // drained; nothing corrupted by the earlier full pushes
 }
 
-TEST_CASE("pop until empty returns false") {
+TEST_CASE("pop until empty returns false", "[spsc]") {
     SpscQueue<int, 4> q;
     int v = 0;
     CHECK_FALSE(q.pop(v));    // empty from the start
@@ -53,7 +53,7 @@ TEST_CASE("pop until empty returns false") {
     CHECK_FALSE(q.pop(v));    // empty again after draining
 }
 
-TEST_CASE("push/pop cycling around the wraparound boundary stays correct") {
+TEST_CASE("push/pop cycling around the wraparound boundary stays correct", "[spsc]") {
     // Capacity 4 wraps every 3 pushes (one slot reserved). Cycle push,pop
     // repeatedly well past the point where head_/tail_ wrap past the array
     // bound multiple times, checking FIFO order survives every wrap.
@@ -78,7 +78,7 @@ TEST_CASE("push/pop cycling around the wraparound boundary stays correct") {
     CHECK(q.size() == 0);
 }
 
-TEST_CASE("size() reflects occupancy across pushes and pops") {
+TEST_CASE("size() reflects occupancy across pushes and pops", "[spsc]") {
     SpscQueue<int, 8> q;
     CHECK(q.size() == 0);
     REQUIRE(q.push(1));
@@ -100,7 +100,7 @@ TEST_CASE("size() reflects occupancy across pushes and pops") {
 // the acquire/release pairing is race-free; that's a manual/CI check, not
 // something wired into this binary.
 TEST_CASE("concurrent producer/consumer preserves strict order under wraparound",
-          "[concurrency]") {
+          "[concurrency][spsc]") {
     constexpr std::size_t kCapacity = 1024;
     constexpr int kCount = 5'000'000;
 
@@ -136,7 +136,7 @@ TEST_CASE("concurrent producer/consumer preserves strict order under wraparound"
 }
 
 TEST_CASE("index caches never let the producer overwrite an unread slot",
-          "[concurrency]") {
+          "[concurrency][spsc]") {
     // Capacity 4 (3 usable slots) forces constant full/empty transitions,
     // so both cached indices go stale and get refreshed millions of times.
     // A multi-word payload makes a torn or premature read detectable.
@@ -170,7 +170,7 @@ TEST_CASE("index caches never let the producer overwrite an unread slot",
     CHECK(received == kCount);
 }
 
-TEST_CASE("queue indices sit on separate cache lines") {
+TEST_CASE("queue indices sit on separate cache lines", "[spsc]") {
     using Q = SpscQueue<int, 8>;
     CHECK(alignof(Q) >= 64);
     CHECK(sizeof(Q) % 64 == 0);

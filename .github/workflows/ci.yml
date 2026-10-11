@@ -272,9 +272,44 @@ jobs:
       # this project's own spsc_queue test comment named as the missing
       # piece: acquire/release ordering reasoned about in comments, now
       # actually checked by the tool built for it, not just argued in prose.
-      - name: Run [concurrency]-tagged tests under TSan
+      #
+      # [spsc] adds the SPSC queue's single-threaded cases too, so every
+      # test of the queue (including its cached-index wraparound cases) runs
+      # under TSan, not just the cross-thread ones.
+      - name: Run [concurrency]- and [spsc]-tagged tests under TSan
         if: matrix.sanitizer == 'thread'
-        run: ./build-san/unit_tests "[concurrency]"
+        run: ./build-san/unit_tests "[concurrency],[spsc]"
+
+  # Informational only: never blocks a merge (continue-on-error) and gates
+  # nothing. GitHub-hosted runners are shared, virtualized machines, so the
+  # absolute numbers move from run to run; the job summary says so. The
+  # hard LadderBook-vs-OrderBook ratio gate lives in build-test above.
+  bench-summary:
+    name: benchmark summary (shared runner, noisy)
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure
+        run: cmake -B build -DCMAKE_BUILD_TYPE=Release
+
+      - name: Build bench
+        run: cmake --build build --parallel --target bench
+
+      - name: Run benchmark, write job summary
+        run: |
+          {
+            echo "## Benchmark (GitHub-hosted ubuntu-latest: shared runner, noisy)"
+            echo
+            echo "Absolute numbers on a shared, virtualized runner vary between runs."
+            echo "Compare OrderBook vs LadderBook within this run, not across runs."
+            echo
+            echo "Runner CPU: $(lscpu | sed -n 's/^Model name:[[:space:]]*//p' | head -1)," \
+                 "$(nproc) vCPUs, compiler: $(c++ --version | head -1)"
+            echo
+          } >> "$GITHUB_STEP_SUMMARY"
+          ./build/bench --out=bench-summary.csv --summary-md="$GITHUB_STEP_SUMMARY"
 
   coverage:
     name: coverage (gcc + lcov)
