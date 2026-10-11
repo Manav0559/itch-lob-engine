@@ -1,4 +1,5 @@
 #include <catch2/catch_test_macros.hpp>
+#include <cerrno>
 #include <chrono>
 #include <cstdint>
 #include <cstring>
@@ -84,9 +85,24 @@ public:
     TestClient& operator=(const TestClient&) = delete;
 
     std::string request(const std::string& line) {
-        const std::string with_nl = line + "\n";
-        REQUIRE(::send(fd_, with_nl.data(), with_nl.size(), 0) == static_cast<ssize_t>(with_nl.size()));
+        send_raw(line + "\n");
+        return read_line();
+    }
 
+    // Raw send with no trailing newline appended and no response read —
+    // lets a test drive input handle_connection's line-reassembly loop
+    // itself wouldn't produce via request() (e.g. a line longer than
+    // kMaxLineLen with no '\n' in it at all).
+    void send_raw(const std::string& data) {
+        std::size_t sent = 0;
+        while (sent < data.size()) {
+            const ssize_t n = ::send(fd_, data.data() + sent, data.size() - sent, 0);
+            REQUIRE(n > 0);
+            sent += static_cast<std::size_t>(n);
+        }
+    }
+
+    std::string read_line() {
         std::string buf;
         char c;
         while (buf.empty() || buf.back() != '\n') {
@@ -96,6 +112,24 @@ public:
         }
         buf.pop_back();  // trailing '\n'
         return buf;
+    }
+
+    // Returns true if the peer closed the connection, false if it's still
+    // open (data pending or still just idle) — used to confirm a "too long"
+    // response is followed by an actual close, not just an error message on
+    // an otherwise-open connection. A clean FIN reads back as recv() == 0;
+    // but the server here closes right after sending its response without
+    // necessarily having drained every byte the client already handed the
+    // kernel (a client sending 70,000 bytes past the length cap easily
+    // outraces the server's read loop) — closing a socket with unread data
+    // still in its receive buffer sends an RST instead of a FIN, which
+    // surfaces here as ECONNRESET, not a 0 return. Both mean "the peer
+    // closed it."
+    bool peer_closed() {
+        char c;
+        const ssize_t n = ::recv(fd_, &c, 1, 0);
+        if (n == 0) return true;
+        return n < 0 && errno == ECONNRESET;
     }
 
 private:
@@ -164,6 +198,17 @@ TEST_CASE("QueryServer answers list/quote requests from a published snapshot ove
     SECTION("a line with no cmd field at all is a bad request, not a hang or crash") {
         const std::string resp = client.request(R"({"oops":true})");
         CHECK(resp.find("\"error\":\"bad request\"") != std::string::npos);
+    }
+
+    SECTION("a line longer than kMaxLineLen with no newline gets a clear error and the "
+            "connection is closed, instead of an unbounded per-connection buffer") {
+        // No trailing '\n': this exercises handle_connection's kMaxLineLen
+        // guard on the still-unterminated buffer, not the ordinary
+        // line-reassembly path any other SECTION here goes through.
+        client.send_raw(std::string(70'000, 'a'));
+        const std::string resp = client.read_line();
+        CHECK(resp.find("\"error\":\"request line too long\"") != std::string::npos);
+        CHECK(client.peer_closed());
     }
 
     SECTION("one connection can issue multiple sequential requests") {
