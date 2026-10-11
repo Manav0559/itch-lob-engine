@@ -18,9 +18,14 @@ So there are two separate checks with two separate jobs:
 
 ## Check 1 — ratio gate (hard fail on Linux; warning on macOS)
 
-For every message type, `LadderBook`'s p50 must be under
-`--ratio-threshold` (default **0.90**, i.e. LadderBook must be at least 10%
-faster than OrderBook) of `OrderBook`'s p50, **on the same run**.
+`LadderBook`'s batch-amortized per-message p50 (the `ALL` row, see
+[README.md](README.md#methodology)) must be under `--ratio-threshold`
+(default **0.90**, i.e. LadderBook must be at least 10% faster than
+OrderBook) of `OrderBook`'s, **on the same run**. Earlier versions gated
+each message type's per-call p50; those per-call numbers were quantized to
+the clock tick on macOS, so the gate now uses the batch-timed row, which is
+measured the same way on every platform. Per-type rows (x86 only) are
+recorded and drift-checked but not gated.
 
 This is the check that is allowed to fail the build — on Linux. It works
 because it's a ratio computed within a single benchmark run on a single
@@ -31,8 +36,8 @@ someone adds an allocation or a `std::map` lookup to `LadderBook`'s hot path
 and its advantage over `OrderBook` narrows or disappears.
 
 0.90 was picked as loose enough that normal CI jitter (which affects both
-books roughly proportionally) won't trip it — current healthy ratios range
-from ~0.34 to ~0.78 (see `bench/results.csv`), so there's real headroom —
+books roughly proportionally) won't trip it — the committed `bench/results.csv`
+run (Apple M2) shows 0.45 (38.6 / 86.3 ns per message), so there's real headroom —
 but tight enough that a regression which makes LadderBook only marginally
 faster than OrderBook (defeating the entire point of the flat-ladder
 design) still fails.

@@ -14,9 +14,10 @@ full limit order book per symbol from individual order events
 days.
 
 **Project rule: every number in this README is produced by a committed target
-you can run.** The numbers below come from `./build/bench` (see
-[bench/](bench/)) on an Apple M2 (arm64, macOS 26.1), `-O2`, AppleClang 17 —
-a fixed-seed synthetic 2.2M-message session across 9 symbols, one discarded
+you can run.** The benchmark numbers below come from `./build/bench` (see
+[bench/](bench/README.md#methodology)) on an Apple M2 (8 GB, macOS 26.1),
+Release build (`-O3`), AppleClang 17 — a fixed-seed synthetic 2.2M-message
+session across 9 symbols, timed in batches of 1024 messages, one discarded
 warm-up pass + 3 measured passes. Regenerate with:
 
 ```bash
@@ -38,7 +39,8 @@ repo.
       skipped by length — the stream can never desynchronize)
 - [x] Decoders for the book-building set: `A F E C X D U`, byte-offset exact,
       round-trip tested against mirror encoders
-- [x] Order-id book: hash-map locator + price-level aggregates, `std::map`
+- [x] Order-id book: order locator (preallocated open-addressing table,
+      no per-insert allocation) + price-level aggregates, `std::map`
       ladders (deliberate v1 baseline)
 - [x] Unit tests (Catch2) incl. the classic footguns: phantom empty levels,
       duplicate refs, over-executes on feed gaps, truncated tails
@@ -147,7 +149,7 @@ repo.
       differences (see [fuzz/README.md](fuzz/README.md#differential-fuzzing-orderbook-vs-ladderbook-fuzz_differentialcpp))
 - [x] Measured line/branch coverage, not just a test count: a dedicated CI
       job builds `include/` + `src/` with `--coverage` (gcc), runs the full
-      112-test suite, and captures/filters the result with `lcov` — the
+      134-test suite (ctest), and captures/filters the result with `lcov` — the
       README badge above and every CI run's job summary report an actual
       percentage instead of asserting thoroughness in prose; see
       [coverage/README.md](coverage/README.md) for what's measured (and
@@ -183,43 +185,57 @@ repo.
   additions) are skipped, not tripped over. A known type arriving with the
   wrong length is surfaced as corrupt — never misparsed.
 - **Locator + aggregates.** ITCH executes/cancels/deletes reference the order
-  id, never the price. Per-order state therefore lives in an
-  `unordered_map<ref, {shares, price, side}>`; the ladders only carry
-  per-level `{shares, order count}`. Empty levels are erased immediately —
-  a phantom level corrupts best-bid/ask and depth, and there is a regression
-  test for exactly that.
+  id, never the price. Per-order state therefore lives in a per-book
+  `book::OrderLocator` (`include/book/order_locator.hpp`): ref →
+  `{shares, price, side}` in an open-addressing table preallocated up front,
+  so add/delete/replace never touch the allocator while the book stays
+  within its reservation (it doubles past that, and counts it). The ladders
+  only carry per-level `{shares, order count}`. Empty levels are erased
+  immediately — a phantom level corrupts best-bid/ask and depth, and there
+  is a regression test for exactly that.
+- **Allocation kept off the hot path.** `LadderBook`'s price window
+  and locator are sized at construction (`book::LadderOptions`, set in
+  `pipeline::BookTraits<LadderBook>`); `reserve_price_range()` /
+  `reserve_orders()` pre-size a book off the hot path. If a price still
+  lands outside the window, the ladder grows geometrically (the span at
+  least doubles, capped at `max_ticks`), so a drifting symbol regrows
+  O(log range) times instead of on every new extreme.
 - **`std::map` first, on purpose.** The interesting claim was never "arrays
   are faster than red-black trees" in the abstract — it's *by how much*,
   measured on the same byte-identical stream through both implementations.
   `LadderBook`'s O(1) indexed lookup beats `OrderBook`'s O(log levels) tree
-  work across every message type, and the gap widens sharply in the tail:
+  work. Committed run ([bench/results.csv](bench/results.csv)), per-message
+  cost amortized over 1024-message batches, single thread, Apple M2:
 
-  | type | OrderBook p50 | LadderBook p50 | OrderBook p99.9 | LadderBook p99.9 |
-  |------|--------------:|---------------:|----------------:|-----------------:|
-  | A    | 166 ns        | 42 ns          | 10,709 ns       | 4,125 ns         |
-  | E    | 334 ns        | 208 ns         | 13,166 ns       | 7,625 ns         |
-  | C    | 334 ns        | 208 ns         | 13,500 ns       | 7,666 ns         |
-  | X    | 334 ns        | 208 ns         | 13,792 ns       | 7,167 ns         |
-  | D    | 417 ns        | 292 ns         | 15,667 ns       | 10,375 ns        |
-  | U    | 542 ns        | 375 ns         | 22,458 ns       | 12,042 ns        |
+  | book       | throughput     | p50 ns/msg | p99 ns/msg | p99.9 ns/msg |
+  |------------|---------------:|-----------:|-----------:|-------------:|
+  | OrderBook  | 10.9 M msg/s   | 86.3       | 193.8      | 1,027.4      |
+  | LadderBook | 23.2 M msg/s   | 38.6       | 104.8      | 939.7        |
 
-  ![p50 latency, OrderBook vs LadderBook](bench/plots/p50_ns.png)
-  ![p99 latency, OrderBook vs LadderBook](bench/plots/p99_ns.png)
-  ![p99.9 latency, OrderBook vs LadderBook](bench/plots/p999_ns.png)
+  This laptop is not an isolated benchmark machine. Across five more
+  back-to-back runs, LadderBook's p50 ranged from 40.8 to 47.1 ns/msg and its
+  throughput from 11.5 to 21.5 M msg/s (OrderBook: 88.9–105.6 ns/msg,
+  6.4–9.2 M msg/s); the LadderBook/OrderBook p50 ratio stayed between 0.39
+  and 0.53.
 
-  Full distributions and plots: [bench/results.csv](bench/results.csv),
-  [bench/plots/](bench/plots/) (regenerate with `python3 bench/plot.py`
-  after any `./build/bench` run — requires `pip install matplotlib`).
-  `std::map`'s tail is dominated by
-  red-black-tree rebalancing on insert/erase; `LadderBook` pays a fixed
-  array-index cost regardless of how full the book is, at the cost of a
-  bounded price window fixed at construction (see `include/book/ladder_book.hpp`).
-  Regenerated after `LadderBook` became the production default (see the
-  `pipeline::BookTable`/`BookBuilder` entry above) — absolute numbers move
-  run to run with this machine's background load (the project's own
-  single-run-no-warmup caveat, and why `bench/check_budget.py`'s CI gate is a
-  same-run ratio check, not an absolute one), but the ratio between the two
-  books is the reproducible, load-bearing part of this table.
+  The percentiles are over batches, so they are amortized costs, not the
+  latency of an individual message. Per-message, per-type numbers need a
+  sub-tick cycle counter: `./build/bench` produces them on x86-64 (rdtsc,
+  overhead subtracted) and CI's `bench-summary` job publishes them from a
+  shared, noisy ubuntu-latest runner. They are not published for the M2,
+  whose user-space clock ticks every ~41.7 ns. Earlier versions of this
+  README quoted a 42 ns LadderBook Add p50: that was a single clock tick
+  from per-call `steady_clock` timing, not a latency.
+
+  ![per-message cost, OrderBook vs LadderBook](bench/plots/per_msg_ns.png)
+  ![throughput, OrderBook vs LadderBook](bench/plots/throughput.png)
+
+  Regenerate the plots with `python3 bench/plot.py` after any
+  `./build/bench` run (requires `pip install matplotlib`). `LadderBook`
+  pays a fixed array-index cost regardless of how full the book is, at the
+  cost of a bounded, pre-sized price window (see
+  `include/book/ladder_book.hpp`). `bench/check_budget.py`'s CI gate is a
+  same-run ratio check, not an absolute one, for the same noise reason.
 
 ## Build & test
 

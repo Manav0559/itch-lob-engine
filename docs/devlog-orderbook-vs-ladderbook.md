@@ -7,6 +7,18 @@ tick-indexed `std::vector`s. This is the story of why both exist, what the
 second one actually costs you, and what the numbers say once you stop
 asserting and start measuring.
 
+> **Measurement caveat (added later).** The per-message-type tables in this
+> devlog were produced by the original harness, which timed each book call
+> individually with `std::chrono::steady_clock` on an Apple M2. That clock
+> ticks every ~41.7 ns there, so every value below is a multiple of one tick
+> (42, 83, 125 ns ...), and the smallest ones (the 42 ns LadderBook p50s) are
+> one tick, not a latency. The comparisons in the tail columns are still
+> directionally meaningful, but the small absolute values are not. The
+> harness now times 1024-message batches; see
+> [bench/README.md](../bench/README.md#methodology) for the current method
+> and numbers. The order locator described here as a hash map is now
+> `book::OrderLocator`, and `kMaxTicks` is now `LadderOptions::max_ticks`.
+
 ## Why `std::map` shipped first, on purpose
 
 `OrderBook` was the v1 baseline, and it stayed `std::map`-based on purpose,

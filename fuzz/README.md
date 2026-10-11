@@ -137,7 +137,7 @@ libFuzzer records it as a crash with a minimized reproducer.
 
 The two books do **not** have identical acceptance policies, on purpose:
 `LadderBook`'s tick-grid rejects a price outside its (growable, but
-hard-capped at `kMaxTicks`) window or off the tick grid; `OrderBook`'s
+hard-capped at `LadderOptions::max_ticks`) window or off the tick grid; `OrderBook`'s
 `std::map` ladders accept any price. This is documented, intentional
 behavior — the devlog above measured this exact policy once silently
 dropping ~30% of a real NASDAQ day's mutations under a fixed window, which
@@ -180,7 +180,7 @@ This harness runs meaningfully slower than `fuzz_parser.cpp` — tens of
 executions/second, not millions. That's real, and it's `LadderBook`'s own
 construction cost, not fuzzer overhead: every new locate a run touches
 allocates two flat `Level` vectors sized to that locate's price window (up
-to `kMaxTicks` per side at the extreme), where `OrderBook`'s `std::map`
+to `max_ticks` per side at the extreme), where `OrderBook`'s `std::map`
 ladders only ever allocate per occupied level. Feeding real wire-derived,
 unconstrained prices into `LadderBook` — the entire point of this harness —
 means periodically paying that allocation cost once per newly-seen locate,

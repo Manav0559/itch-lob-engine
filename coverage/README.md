@@ -1,7 +1,7 @@
 # Coverage
 
 The README and this project's prose have always claimed the test suite is
-thorough -- 112 Catch2 tests, a three-way (`OrderBook` / `LadderBook` /
+thorough -- 132 Catch2 test cases (134 ctest tests), a three-way (`OrderBook` / `LadderBook` /
 independent reference model) full-day cross-validation, and continuous
 fuzzing. None of that was ever backed by a measured number: no gcov/lcov
 integration, no coverage badge, nothing that turns "trust me, it's well

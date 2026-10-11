@@ -6,6 +6,19 @@
 > at the end of this file for what changed, what didn't, and why the verdict
 > got *noisier*, not just different, once book mutation got cheaper.
 
+> **Measurement caveat (added later).** Per-message numbers in this file
+> (the SPSC round-trip latencies and the book-mutation table) were timed one
+> call at a time with `steady_clock` on an Apple M2, whose clock ticks every
+> ~41.7 ns, so they are tick multiples (the "42 ns" and "125 ns" values are
+> one and three ticks). Throughput numbers (messages/second over a whole
+> pass) are not affected. Since then the order locator stopped allocating
+> per order, which raised single-threaded throughput on the same machine
+> from 4.6–7.4 M msg/s to 17.0–21.6 M msg/s (median pass of three runs each
+> of `./build/bench_threaded`, before/after `book::OrderLocator`). In those
+> runs the threaded pipeline was still not faster than single-threaded
+> (committed `bench/results_threaded.csv`: 21.2 M vs 19.6 M msg/s), so the
+> verdict below stands; its own numbers are from the older code.
+
 **No, not measurably.** Across four independent runs, end-to-end throughput for
 `replay_threaded_main.cpp` (parser thread → SPSC queue → book-builder thread)
 lands within noise of the single-threaded `replay_main.cpp` path — sometimes a
