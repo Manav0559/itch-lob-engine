@@ -36,7 +36,7 @@ CSVs as this README.
 | Mean p50 ratio (all 6 msg types) | 1.00 | 0.586 | **1.7x faster** |
 | Add, p99.9 (tail) latency | 10,709 ns | 4,125 ns | **2.60x faster** |
 | Threaded vs single-threaded throughput | 6.45M msg/s | 6.69M msg/s (best-of-3) | **1.04x** |
-| Line / branch coverage | — | 86.6% / 50.6% | 112 tests |
+| Line / branch coverage | — | 86.6% / 50.6% | 122 tests (ctest) |
 
 Full per-message-type breakdown, plots, and methodology: see
 [Design notes](#design-notes) below and [bench/](bench/).
@@ -157,7 +157,7 @@ repo.
       crashes found so far; see [fuzz/README.md](fuzz/README.md)
 - [x] Measured line/branch coverage, not just a test count: a dedicated CI
       job builds `include/` + `src/` with `--coverage` (gcc), runs the full
-      112-test suite, and captures/filters the result with `lcov` — the
+      122-test suite (ctest), and captures/filters the result with `lcov` — the
       README badge above and every CI run's job summary report an actual
       percentage instead of asserting thoroughness in prose; see
       [coverage/README.md](coverage/README.md) for what's measured (and
