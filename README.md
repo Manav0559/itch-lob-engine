@@ -7,6 +7,8 @@
 
 A NASDAQ TotalView-ITCH 5.0 order-book reconstruction engine in C++20.
 
+**Live results dashboard:** https://manav0559.github.io/itch-lob-engine/dashboard/
+
 Parses the real exchange binary protocol (length-prefixed `BinaryFILE`
 framing, big-endian wire integers, 48-bit nanosecond timestamps), rebuilds the
 full limit order book per symbol from individual order events
