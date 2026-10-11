@@ -134,3 +134,44 @@ TEST_CASE("concurrent producer/consumer preserves strict order under wraparound"
     CHECK(ok);
     CHECK(next_expected == kCount);
 }
+
+TEST_CASE("index caches never let the producer overwrite an unread slot",
+          "[concurrency]") {
+    // Capacity 4 (3 usable slots) forces constant full/empty transitions,
+    // so both cached indices go stale and get refreshed millions of times.
+    // A multi-word payload makes a torn or premature read detectable.
+    struct Payload {
+        std::uint64_t seq;
+        std::uint64_t check;
+    };
+    constexpr int kCount = 2'000'000;
+    SpscQueue<Payload, 4> q;
+
+    std::thread producer([&] {
+        for (int i = 0; i < kCount; ++i) {
+            const auto s = static_cast<std::uint64_t>(i);
+            while (!q.push(Payload{s, ~s})) std::this_thread::yield();
+        }
+    });
+
+    bool ok = true;
+    int received = 0;
+    Payload p{};
+    while (received < kCount) {
+        if (!q.pop(p)) {
+            std::this_thread::yield();
+            continue;
+        }
+        if (p.seq != static_cast<std::uint64_t>(received) || p.check != ~p.seq) ok = false;
+        ++received;
+    }
+    producer.join();
+    CHECK(ok);
+    CHECK(received == kCount);
+}
+
+TEST_CASE("queue indices sit on separate cache lines") {
+    using Q = SpscQueue<int, 8>;
+    CHECK(alignof(Q) >= 64);
+    CHECK(sizeof(Q) % 64 == 0);
+}
