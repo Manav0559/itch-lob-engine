@@ -92,6 +92,7 @@ add_executable(unit_tests
   tests/test_parser.cpp
   tests/test_book.cpp
   tests/test_ladder_book.cpp
+  tests/test_order_locator.cpp
   tests/test_exec_twap.cpp
   tests/test_exec_vwap.cpp
   tests/test_volume_curve.cpp

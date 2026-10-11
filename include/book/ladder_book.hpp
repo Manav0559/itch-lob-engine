@@ -3,15 +3,15 @@
 #include <cstdint>
 #include <optional>
 #include <stdexcept>
-#include <unordered_map>
 #include <vector>
 
 #include "book/order_book.hpp"
+#include "book/order_locator.hpp"
 #include "itch/messages.hpp"
 
 namespace book {
 
-// Same order-id book as OrderBook — same hash-map locator, same mutator
+// Same order-id book as OrderBook — same order locator, same mutator
 // semantics — but the two std::map ladders are replaced with flat arrays
 // indexed by (price - min_price_) / tick_size_. A single level's lookup and
 // mutation become O(1) array indexing instead of O(log levels) tree work, at
@@ -69,8 +69,8 @@ public:
         // now that LadderBook is wired into production against real files.
         if (!in_range(price) && !grow_to_include(price)) return false;
         if ((price - min_price_) % tick_size_ != 0) return false;
-        const auto [it, inserted] = orders_.try_emplace(ref, Order{shares, price, side});
-        if (!inserted) return false;  // duplicate ref: never double-count a level
+        // duplicate ref: never double-count a level
+        if (!orders_.insert(ref, RestingOrder{shares, price, side})) return false;
         const std::size_t i = idx(price);
         if (side == itch::Side::Buy) {
             Level& lvl = bids_[i];
@@ -94,21 +94,18 @@ public:
     bool cancel(std::uint64_t ref, std::uint32_t shares) { return reduce(ref, shares); }
 
     bool remove(std::uint64_t ref) {
-        const auto it = orders_.find(ref);
-        if (it == orders_.end()) return false;
-        const Order o = it->second;
-        orders_.erase(it);
+        RestingOrder o{};
+        if (!orders_.extract(ref, o)) return false;
         level_sub(o.side, o.price, o.shares, /*order_gone=*/true);
         return true;
     }
 
     bool replace(std::uint64_t orig, std::uint64_t next, std::uint32_t shares,
                  std::uint32_t price) {
-        const auto it = orders_.find(orig);
-        if (it == orders_.end()) return false;
-        const itch::Side side = it->second.side;  // 'U' carries no side field
-        remove(orig);
-        return add(next, side, shares, price);
+        RestingOrder o{};
+        if (!orders_.extract(orig, o)) return false;
+        level_sub(o.side, o.price, o.shares, /*order_gone=*/true);
+        return add(next, o.side, shares, price);  // 'U' carries no side field
     }
 
     std::optional<Quote> best_bid() const {
@@ -126,12 +123,9 @@ public:
     std::size_t bid_levels() const { return bid_level_count_; }
     std::size_t ask_levels() const { return ask_level_count_; }
 
+    std::size_t locator_growths() const { return orders_.growths(); }
+
 private:
-    struct Order {
-        std::uint32_t shares;
-        std::uint32_t price;
-        itch::Side side;
-    };
 
     LadderBook(std::uint32_t tick_size, std::uint32_t min_price, std::uint32_t max_price,
                double window_pct)
@@ -259,9 +253,9 @@ private:
     }
 
     bool reduce(std::uint64_t ref, std::uint32_t shares) {
-        const auto it = orders_.find(ref);
-        if (it == orders_.end()) return false;
-        Order& o = it->second;
+        RestingOrder* found = orders_.find(ref);
+        if (found == nullptr) return false;
+        RestingOrder& o = *found;
         // Clamp: a feed gap can deliver an execute larger than what we hold;
         // draining to zero keeps the aggregates consistent either way.
         const std::uint32_t qty = shares < o.shares ? shares : o.shares;
@@ -269,7 +263,7 @@ private:
         const bool gone = (o.shares == 0);
         const itch::Side side = o.side;
         const std::uint32_t price = o.price;
-        if (gone) orders_.erase(it);
+        if (gone) orders_.erase(ref);
         level_sub(side, price, qty, gone);
         return true;
     }
@@ -333,7 +327,7 @@ private:
     std::size_t ask_level_count_ = 0;
     std::optional<std::size_t> best_bid_idx_;
     std::optional<std::size_t> best_ask_idx_;
-    std::unordered_map<std::uint64_t, Order> orders_;  // the locator, shared shape with OrderBook
+    OrderLocator orders_;  // the locator, same type as OrderBook's
 };
 
 }  // namespace book

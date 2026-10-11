@@ -3,7 +3,8 @@
 #include <functional>
 #include <map>
 #include <optional>
-#include <unordered_map>
+
+#include "book/order_locator.hpp"
 
 #include "itch/messages.hpp"
 
@@ -21,7 +22,8 @@ struct Quote {
 
 // Price-level book driven by ITCH order-id events. Executes, cancels and
 // deletes reference the order id — never the price — so per-order state
-// lives in a hash-map locator and the price ladders carry only per-level
+// lives in an order locator (book/order_locator.hpp — a preallocated
+// open-addressing table, no per-insert allocation) and the price ladders carry only per-level
 // aggregates. Mutators return false on unknown/duplicate refs instead of
 // throwing: on a real feed those indicate a gap, and the caller decides
 // whether to count or resync.
@@ -31,10 +33,13 @@ struct Quote {
 // measured comparison, not an asserted one.
 class OrderBook {
 public:
+    OrderBook() = default;
+    explicit OrderBook(std::size_t expected_orders) : orders_(expected_orders) {}
+
     bool add(std::uint64_t ref, itch::Side side, std::uint32_t shares,
              std::uint32_t price) {
-        const auto [it, inserted] = orders_.try_emplace(ref, Order{shares, price, side});
-        if (!inserted) return false;  // duplicate ref: never double-count a level
+        // duplicate ref: never double-count a level
+        if (!orders_.insert(ref, RestingOrder{shares, price, side})) return false;
         Level& lvl = (side == itch::Side::Buy) ? bids_[price] : asks_[price];
         lvl.shares += shares;
         lvl.orders += 1;
@@ -47,21 +52,18 @@ public:
     bool cancel(std::uint64_t ref, std::uint32_t shares) { return reduce(ref, shares); }
 
     bool remove(std::uint64_t ref) {
-        const auto it = orders_.find(ref);
-        if (it == orders_.end()) return false;
-        const Order o = it->second;
-        orders_.erase(it);
+        RestingOrder o{};
+        if (!orders_.extract(ref, o)) return false;
         level_sub(o.side, o.price, o.shares, /*order_gone=*/true);
         return true;
     }
 
     bool replace(std::uint64_t orig, std::uint64_t next, std::uint32_t shares,
                  std::uint32_t price) {
-        const auto it = orders_.find(orig);
-        if (it == orders_.end()) return false;
-        const itch::Side side = it->second.side;  // 'U' carries no side field
-        remove(orig);
-        return add(next, side, shares, price);
+        RestingOrder o{};
+        if (!orders_.extract(orig, o)) return false;
+        level_sub(o.side, o.price, o.shares, /*order_gone=*/true);
+        return add(next, o.side, shares, price);  // 'U' carries no side field
     }
 
     std::optional<Quote> best_bid() const {
@@ -79,17 +81,13 @@ public:
     std::size_t bid_levels() const { return bids_.size(); }
     std::size_t ask_levels() const { return asks_.size(); }
 
-private:
-    struct Order {
-        std::uint32_t shares;
-        std::uint32_t price;
-        itch::Side side;
-    };
+    std::size_t locator_growths() const { return orders_.growths(); }
 
+private:
     bool reduce(std::uint64_t ref, std::uint32_t shares) {
-        const auto it = orders_.find(ref);
-        if (it == orders_.end()) return false;
-        Order& o = it->second;
+        RestingOrder* found = orders_.find(ref);
+        if (found == nullptr) return false;
+        RestingOrder& o = *found;
         // Clamp: a feed gap can deliver an execute larger than what we hold;
         // draining to zero keeps the aggregates consistent either way.
         const std::uint32_t qty = shares < o.shares ? shares : o.shares;
@@ -97,7 +95,7 @@ private:
         const bool gone = (o.shares == 0);
         const itch::Side side = o.side;
         const std::uint32_t price = o.price;
-        if (gone) orders_.erase(it);
+        if (gone) orders_.erase(ref);
         level_sub(side, price, qty, gone);
         return true;
     }
@@ -125,7 +123,7 @@ private:
 
     std::map<std::uint32_t, Level, std::greater<>> bids_;  // best bid first
     std::map<std::uint32_t, Level> asks_;                  // best ask first
-    std::unordered_map<std::uint64_t, Order> orders_;      // the locator
+    OrderLocator orders_;                                  // the locator
 };
 
 }  // namespace book
