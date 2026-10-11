@@ -1,13 +1,3 @@
-book_type,message_type,count,p50_ns,p99_ns,p999_ns
-OrderBook,A,3631827,166,833,10709
-OrderBook,E,1121796,334,958,13166
-OrderBook,C,329547,334,958,13500
-OrderBook,X,860886,334,958,13792
-OrderBook,D,393828,417,1417,15667
-OrderBook,U,262116,542,2083,22458
-LadderBook,A,3631827,42,542,4125
-LadderBook,E,1121796,208,667,7625
-LadderBook,C,329547,208,667,7666
-LadderBook,X,860886,208,667,7167
-LadderBook,D,393828,292,875,10375
-LadderBook,U,262116,375,1208,12042
+book_type,message_type,count,p50_ns,p99_ns,p999_ns,msgs_per_sec,method
+OrderBook,ALL,6444,86.3,193.8,1027.4,10886713,batch1024
+LadderBook,ALL,6444,38.6,104.8,939.7,23163882,batch1024

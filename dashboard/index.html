@@ -315,12 +315,14 @@
 
   <section class="panel">
     <p class="eyebrow">// 01 · latency</p>
-    <h2>OrderBook vs LadderBook — per-message latency</h2>
+    <h2>OrderBook vs LadderBook — throughput and per-message cost</h2>
     <p class="desc">
-      p50 / p99 / p99.9 nanoseconds per message type, from a fixed-seed 2.2M-message synthetic
-      session (one discarded warm-up pass + 3 measured passes). Each panel has its own axis —
-      p50 and p99.9 differ by roughly two orders of magnitude, so a shared scale would flatten
-      the smaller values to nothing.
+      Fixed-seed 2.2M-message synthetic session, one discarded warm-up pass + 3 measured passes,
+      timed in batches of 1024 messages (one clock read per batch). Per-message p50 / p99 / p99.9
+      are amortized over each batch, not the latency of an individual message. Per-type charts
+      appear only when the CSV comes from an x86-64 run (rdtsc per call, timer overhead
+      subtracted); the committed CSV is from an Apple M2, whose clock ticks every ~41.7 ns, so
+      it has none. See <code>bench/README.md</code> for the method.
     </p>
     <div class="chart-grid" id="latencyCharts">
       <div class="loading-state">Loading bench/results.csv…</div>
@@ -347,6 +349,11 @@
       <div class="chart-card">
         <h3>SPSC queue round-trip latency (ns)</h3>
         <div id="spscTable"><div class="loading-state">Loading bench/results_threaded.csv…</div></div>
+        <p class="desc" style="margin-top:8px">
+          Timed one round trip at a time with <code>steady_clock</code>. On the Apple M2 that
+          produced the committed CSV the clock ticks every ~41.7 ns, so values under a few hundred
+          ns are tick multiples, not precise latencies.
+        </p>
       </div>
     </div>
   </section>
@@ -355,8 +362,10 @@
     <p class="eyebrow">// 03 · regression watch</p>
     <h2>CI performance ratio over commits</h2>
     <p class="desc">
-      <code>LadderBook</code> p50 ÷ <code>OrderBook</code> p50, averaged across message types,
-      per commit recorded to <code>main</code> by <code>bench/check_budget.py record</code>.
+      <code>LadderBook</code> p50 ÷ <code>OrderBook</code> p50 per commit recorded to
+      <code>main</code> by <code>bench/check_budget.py record</code>: the batch-timed
+      <code>ALL</code> row when present, otherwise (older commits, per-call timing) the mean across
+      message types.
       Lower is better (LadderBook further ahead of OrderBook); the dashed line marks the CI hard-fail
       threshold of 0.90 from <code>bench/BUDGET.md</code>. Faceted by OS, since Linux and macOS
       runners have different absolute performance profiles.
@@ -778,86 +787,92 @@
   fetchCSV("../bench/results.csv").then(function (data) {
     var rows = data.rows;
     if (rows.length === 0) throw new Error("bench/results.csv is empty");
+    if (!("msgs_per_sec" in rows[0])) throw new Error("bench/results.csv is in the old per-call format; rerun ./build/bench");
 
     var byBook = {};
     rows.forEach(function (r) {
       byBook[r.book_type] = byBook[r.book_type] || {};
       byBook[r.book_type][r.message_type] = r;
     });
-    var bookTypes = Object.keys(byBook).sort(); // LadderBook, OrderBook -> want OrderBook first
+    var bookTypes = Object.keys(byBook).sort();
     bookTypes.sort(function (a) { return a === "OrderBook" ? -1 : 1; });
-
     var colorFor = { OrderBook: "var(--series-1)", LadderBook: "var(--series-2)" };
-    var percentiles = [
-      { key: "p50_ns", label: "p50" },
-      { key: "p99_ns", label: "p99" },
-      { key: "p999_ns", label: "p99.9" }
-    ];
+    var seriesColor = function (bt) { return colorFor[bt] || "var(--series-3)"; };
 
     var chartsContainer = document.getElementById("latencyCharts");
     chartsContainer.innerHTML = "";
-    percentiles.forEach(function (pct) {
-      var card = document.createElement("div");
-      card.className = "chart-card";
+    function card(title) {
+      var c = document.createElement("div");
+      c.className = "chart-card";
       var h3 = document.createElement("h3");
-      h3.textContent = pct.label + " latency (ns)";
-      card.appendChild(h3);
-      chartsContainer.appendChild(card);
+      h3.textContent = title;
+      c.appendChild(h3);
+      chartsContainer.appendChild(c);
+      return c;
+    }
 
-      var series = bookTypes.map(function (bt) {
-        return {
-          name: bt,
-          color: colorFor[bt] || "var(--series-3)",
-          values: MSG_TYPES.map(function (mt) {
-            var row = byBook[bt] && byBook[bt][mt];
-            return row ? num(row[pct.key]) : 0;
-          })
-        };
+    var allBooks = bookTypes.filter(function (bt) { return byBook[bt].ALL; });
+    if (allBooks.length > 0) {
+      var pcts = [{ key: "p50_ns", label: "p50" }, { key: "p99_ns", label: "p99" }, { key: "p999_ns", label: "p99.9" }];
+      pcts.forEach(function (pct) {
+        groupedBarChart(card(pct.label + " ns/msg (batch-amortized)"), {
+          categories: ["ALL"],
+          categoryLabels: ["all messages"],
+          series: allBooks.map(function (bt) {
+            return { name: bt, color: seriesColor(bt), values: [num(byBook[bt].ALL[pct.key])] };
+          }),
+          unit: "ns",
+          width: 340,
+          height: 230
+        });
       });
-      groupedBarChart(card, {
-        categories: MSG_TYPES,
-        categoryLabels: MSG_TYPES.map(function (mt) { return MSG_NAMES[mt] || mt; }),
-        series: series,
+      groupedBarChart(card("Throughput (M msgs/sec, one thread)"), {
+        categories: ["ALL"],
+        categoryLabels: ["all messages"],
+        series: allBooks.map(function (bt) {
+          return { name: bt, color: seriesColor(bt), values: [num(byBook[bt].ALL.msgs_per_sec) / 1e6] };
+        }),
+        unit: "M/s",
+        width: 340,
+        height: 230
+      });
+    }
+
+    var typed = MSG_TYPES.filter(function (mt) {
+      return bookTypes.some(function (bt) { return byBook[bt][mt]; });
+    });
+    if (typed.length > 0) {
+      groupedBarChart(card("Per-type p50 ns/call (x86 rdtsc)"), {
+        categories: typed,
+        categoryLabels: typed.map(function (mt) { return MSG_NAMES[mt] || mt; }),
+        series: bookTypes.map(function (bt) {
+          return { name: bt, color: seriesColor(bt), values: typed.map(function (mt) {
+            return byBook[bt][mt] ? num(byBook[bt][mt].p50_ns) : 0;
+          }) };
+        }),
         unit: "ns",
         width: 340,
         height: 230
       });
-    });
+    }
 
     legendFor(document.getElementById("latencyLegend"), bookTypes.map(function (bt) {
-      return { name: bt, color: colorFor[bt] || "var(--series-3)" };
+      return { name: bt, color: seriesColor(bt) };
     }));
 
-    var codeKey = document.createElement("div");
-    codeKey.className = "legend";
-    codeKey.style.marginTop = "2px";
-    codeKey.innerHTML = MSG_TYPES.map(function (mt) {
-      return "<span><b style=\"color:var(--text-primary)\">" + mt + "</b> = " + MSG_NAMES[mt] + "</span>";
-    }).join(" &nbsp;·&nbsp; ");
-    document.getElementById("latencyLegend").insertAdjacentElement("afterend", codeKey);
-
-    // headline stats: Add p50 speedup + overall mean p50 ratio
-    var addOrder = byBook.OrderBook && byBook.OrderBook.A;
-    var addLadder = byBook.LadderBook && byBook.LadderBook.A;
+    var o = byBook.OrderBook && byBook.OrderBook.ALL;
+    var l = byBook.LadderBook && byBook.LadderBook.ALL;
     var stats = [];
-    if (addOrder && addLadder) {
-      var speedup = num(addOrder.p50_ns) / num(addLadder.p50_ns);
+    if (o && l) {
       stats.push({
-        label: "LadderBook speedup — Add p50",
-        value: speedup.toFixed(2) + "×",
-        note: fmtInt(addOrder.p50_ns) + " ns → " + fmtInt(addLadder.p50_ns) + " ns"
+        label: "LadderBook throughput vs OrderBook",
+        value: (num(l.msgs_per_sec) / num(o.msgs_per_sec)).toFixed(2) + "×",
+        note: fmtCompact(num(o.msgs_per_sec)) + " → " + fmtCompact(num(l.msgs_per_sec)) + " msgs/sec"
       });
-    }
-    if (byBook.OrderBook && byBook.LadderBook) {
-      var ratios = MSG_TYPES.map(function (mt) {
-        var o = byBook.OrderBook[mt], l = byBook.LadderBook[mt];
-        return (o && l) ? num(l.p50_ns) / num(o.p50_ns) : null;
-      }).filter(function (v) { return v != null; });
-      var meanRatio = ratios.reduce(function (a, b) { return a + b; }, 0) / ratios.length;
       stats.push({
-        label: "Mean LadderBook/OrderBook p50 ratio",
-        value: meanRatio.toFixed(2),
-        note: "lower = LadderBook further ahead · CI budget fails above 0.90"
+        label: "LadderBook/OrderBook p50 ratio",
+        value: (num(l.p50_ns) / num(o.p50_ns)).toFixed(2),
+        note: "batch-amortized ns/msg · lower = LadderBook further ahead · CI budget fails above 0.90"
       });
     }
     addStatTiles(stats, "latency");
@@ -960,6 +975,7 @@
         byOs[r.os][sha] = { OrderBook: {}, LadderBook: {} };
         commitOrder[r.os].push(sha);
       }
+      if (!byOs[r.os][sha][r.book_type]) return;
       byOs[r.os][sha][r.book_type][r.message_type] = num(r.p50_ns);
     });
 
@@ -974,6 +990,9 @@
 
       var points = commitOrder[os].map(function (sha) {
         var entry = byOs[os][sha];
+        if (entry.OrderBook.ALL && entry.LadderBook.ALL) {
+          return { x: sha.slice(0, 7), y: entry.LadderBook.ALL / entry.OrderBook.ALL };
+        }
         var ratios = MSG_TYPES.map(function (mt) {
           var o = entry.OrderBook[mt], l = entry.LadderBook[mt];
           return (o && l) ? l / o : null;
