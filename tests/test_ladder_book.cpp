@@ -129,7 +129,7 @@ TEST_CASE("a price outside the ladder window grows the ladder instead of being r
     // its opening window used to have no way back in. tick_size=100 (rather
     // than the default 1) matches what production actually constructs this
     // with — see pipeline::BookTraits<LadderBook> — and keeps this test's
-    // two successive growths well clear of kMaxTicks, which a tick_size=1
+    // two successive growths well clear of max_ticks, which a tick_size=1
     // ladder spanning the same dollar range would not.
     LadderBook b(10'000'000, /*tick_size=*/100);  // window starts at [8'000'000, 12'000'000]
 
@@ -170,7 +170,7 @@ TEST_CASE("growth preserves existing levels, best bid/ask, and open orders exact
     CHECK(b.best_bid()->price == 9'900'000);        // best bid itself untouched
 }
 
-TEST_CASE("growth past kMaxTicks refuses rather than attempting an unbounded allocation [ladder]") {
+TEST_CASE("growth past max_ticks refuses rather than attempting an unbounded allocation [ladder]") {
     // A price this far outside the window would need many millions of
     // ticks to cover — grow_to_include() must refuse (add() returns false,
     // no partial state) instead of attempting that allocation, the same
@@ -215,4 +215,73 @@ TEST_CASE("base_price of 0 with a tiny window still yields a valid, addable ladd
     LadderBook b(0, /*tick_size=*/1, /*window_pct=*/0.30);
     CHECK(b.add(1, Side::Buy, 100, 0));
     CHECK(b.best_bid()->price == 0);
+}
+
+TEST_CASE("reserve_price_range pre-sizes the ladder so later prices never grow it [ladder]") {
+    LadderBook b(10'000'000, /*tick_size=*/100);  // [8'000'000, 12'000'000]
+    REQUIRE(b.reserve_price_range(2'000'000, 30'000'000));
+    const std::size_t ticks = b.ladder_ticks();
+    REQUIRE(b.add(1, Side::Buy, 100, 2'000'000));
+    REQUIRE(b.add(2, Side::Sell, 100, 30'000'000));
+    CHECK(b.ladder_ticks() == ticks);
+    CHECK(b.ladder_growths() == 0);
+    CHECK(b.best_bid()->price == 2'000'000);
+    CHECK(b.best_ask()->price == 30'000'000);
+}
+
+TEST_CASE("reserve_price_range refuses past max_ticks and leaves the book unchanged [ladder]") {
+    book::LadderOptions opts;
+    opts.max_ticks = 1'000;
+    LadderBook b(10'000'000, /*tick_size=*/100, /*window_pct=*/0.0, opts);
+    REQUIRE(b.add(1, Side::Buy, 100, 10'000'000));
+    const std::size_t ticks = b.ladder_ticks();
+    CHECK_FALSE(b.reserve_price_range(0, 100'000'000));
+    CHECK(b.ladder_ticks() == ticks);
+    CHECK(b.best_bid()->price == 10'000'000);
+}
+
+TEST_CASE("growth is geometric: a steadily drifting price regrows O(log range) times [ladder]") {
+    // Window 0 so every new extreme is out of range. Without geometric
+    // slack this would grow on each of the 2,000 new highs.
+    LadderBook b(1'000'000, /*tick_size=*/100, /*window_pct=*/0.0);
+    std::uint64_t ref = 1;
+    for (std::uint32_t p = 1'000'000; p < 1'000'000 + 2'000 * 100; p += 100)
+        REQUIRE(b.add(ref++, Side::Sell, 100, p));
+    CHECK(b.ladder_growths() <= 12);  // ~log2(2000) doublings
+    CHECK(b.best_ask()->price == 1'000'000);
+    CHECK(b.ask_levels() == 2'000);
+}
+
+TEST_CASE("configurable max_ticks bounds growth [ladder]") {
+    book::LadderOptions opts;
+    opts.max_ticks = 500;
+    LadderBook b(1'000'000, /*tick_size=*/100, /*window_pct=*/0.0, opts);
+    CHECK(b.add(1, Side::Buy, 100, 1'000'000 + 400 * 100));   // needs 401 ticks: fine
+    CHECK_FALSE(b.add(2, Side::Buy, 100, 1'000'000 + 600 * 100));  // needs 601 > 500
+    CHECK(b.ladder_ticks() <= 500);
+    CHECK(b.open_orders() == 1);
+}
+
+TEST_CASE("a side that empties completely resets best without scanning [ladder]") {
+    LadderBook b(10'000'000, /*tick_size=*/100);
+    REQUIRE(b.add(1, Side::Sell, 100, 11'000'000));
+    REQUIRE(b.add(2, Side::Buy, 100, 9'000'000));
+    REQUIRE(b.remove(1));
+    CHECK_FALSE(b.best_ask().has_value());
+    CHECK(b.ask_levels() == 0);
+    REQUIRE(b.remove(2));
+    CHECK_FALSE(b.best_bid().has_value());
+    REQUIRE(b.add(3, Side::Sell, 50, 10'500'000));
+    CHECK(b.best_ask()->price == 10'500'000);
+}
+
+TEST_CASE("locator sized from LadderOptions does not grow below the reservation [ladder]") {
+    book::LadderOptions opts;
+    opts.expected_orders = 5'000;
+    LadderBook b(10'000'000, /*tick_size=*/100, 0.20, opts);
+    for (std::uint64_t r = 1; r <= 5'000; ++r)
+        REQUIRE(b.add(r, (r & 1) ? Side::Buy : Side::Sell, 100,
+                      static_cast<std::uint32_t>((r & 1) ? 9'000'000 : 11'000'000)));
+    CHECK(b.locator_growths() == 0);
+    CHECK(b.open_orders() == 5'000);
 }

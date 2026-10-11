@@ -11,6 +11,20 @@
 
 namespace book {
 
+// Construction-time knobs that keep allocation off the per-message path.
+// Defaults reproduce the previous behaviour; production sets them from
+// pipeline::BookTraits<LadderBook> (dispatch_to_book.hpp).
+struct LadderOptions {
+    // Hard ceiling on ticks per side. Growth that would need more refuses
+    // (add() returns false) instead of allocating. At tick_size=100,
+    // 8,000,000 ticks is an $80,000 span; worst-case ladder memory is
+    // 2 * max_ticks * sizeof(Level) = 256 MB, so callers that care should
+    // lower it.
+    std::size_t max_ticks = 8'000'000;
+    // Open orders the locator is sized for up front (no rehash below this).
+    std::size_t expected_orders = 256;
+};
+
 // Same order-id book as OrderBook — same order locator, same mutator
 // semantics — but the two std::map ladders are replaced with flat arrays
 // indexed by (price - min_price_) / tick_size_. A single level's lookup and
@@ -33,7 +47,7 @@ namespace book {
 // gaps or halts past that band no longer gets every message past it silently
 // rejected: add() detects an out-of-range price and rebuilds the ladder
 // around a wider window (grow_to_include(), below) before retrying, up to a
-// hard tick-count ceiling (kMaxTicks) that keeps a single adversarial or
+// hard tick-count ceiling (LadderOptions::max_ticks) that keeps a single adversarial or
 // corrupt wire price from turning into an unbounded allocation. This
 // replaces a real, measured production bug — see
 // docs/devlog-orderbook-vs-ladderbook.md's "Closing the open question": a
@@ -43,21 +57,50 @@ namespace book {
 // This bounded-but-growable range, weighed against std::map's unbounded
 // range, is exactly what the benchmark harness measures OrderBook against.
 //
+// Growth cost: grow_to_include() reallocates both ladders and copies every
+// level, which is a stall proportional to the ladder size on the message
+// that triggers it. Two things keep that off the steady-state hot path:
+//   - growth is geometric: every growth at least doubles the tick span
+//     (capped at max_ticks), so a symbol that drifts steadily triggers
+//     O(log range) regrowths, not one per new extreme price;
+//   - reserve_price_range() lets a caller pre-size the ladder off the hot
+//     path (e.g. from the previous close or a symbol-directory message)
+//     so growth never happens during the session at all.
+// ladder_growths() counts growths so a replay can confirm the result.
+//
 // best_bid()/best_ask() never scan the ladder: a "best occupied index" per
 // side is tracked incrementally. It advances/retreats past emptied levels
-// only when the current best itself empties out, not on every call.
+// only when the current best itself empties out, not on every call, and a
+// side that becomes completely empty resets without scanning.
 class LadderBook {
 public:
     explicit LadderBook(std::uint32_t base_price, std::uint32_t tick_size = 1,
-                         double window_pct = 0.20)
+                         double window_pct = 0.20, LadderOptions opts = {})
         : LadderBook(tick_size == 0 ? 1 : tick_size,
                      snap_to_tick(window_low(base_price, window_pct), tick_size == 0 ? 1 : tick_size),
-                     window_high(base_price, window_pct), window_pct) {}
+                     window_high(base_price, window_pct), window_pct, opts) {}
+
+    // Pre-size the ladder so [lo, hi] is covered without any later growth.
+    // Returns false (and changes nothing) if that would exceed max_ticks.
+    // Never shrinks. Meant for setup, not the per-message path.
+    bool reserve_price_range(std::uint32_t lo, std::uint32_t hi) {
+        if (hi < lo) return false;
+        const std::uint32_t new_min = std::min(min_price_, snap_to_tick(lo, tick_size_));
+        const std::uint32_t new_max = std::max(max_price_, hi);
+        if (new_min == min_price_ && new_max == max_price_) return true;
+        const std::size_t ticks = static_cast<std::size_t>(new_max - new_min) / tick_size_ + 1;
+        if (ticks > max_ticks_) return false;
+        resize_range(new_min, new_max, ticks);
+        return true;
+    }
+
+    // Pre-size the order locator for `n` simultaneously open orders.
+    void reserve_orders(std::size_t n) { orders_.reserve(n); }
 
     bool add(std::uint64_t ref, itch::Side side, std::uint32_t shares, std::uint32_t price) {
         // An out-of-range price grows the ladder (see grow_to_include())
         // instead of getting rejected outright — growth can itself refuse
-        // (kMaxTicks) for a price so extreme it would blow the allocation
+        // (max_ticks_) for a price so extreme it would blow the allocation
         // ceiling, which still falls through to the same false-return path
         // below. idx() below is integer division by tick_size_ — a price
         // that isn't grid-aligned to min_price_ would floor-divide into
@@ -123,19 +166,23 @@ public:
     std::size_t bid_levels() const { return bid_level_count_; }
     std::size_t ask_levels() const { return ask_level_count_; }
 
+    // Observability for the allocation-free claims above.
+    std::size_t ladder_ticks() const { return num_ticks_; }
+    std::size_t ladder_growths() const { return ladder_growths_; }
     std::size_t locator_growths() const { return orders_.growths(); }
 
 private:
-
     LadderBook(std::uint32_t tick_size, std::uint32_t min_price, std::uint32_t max_price,
-               double window_pct)
+               double window_pct, LadderOptions opts)
         : tick_size_(tick_size),
           min_price_(min_price),
           max_price_(check_range(min_price, max_price)),
           window_pct_(window_pct),
+          max_ticks_(opts.max_ticks == 0 ? 1 : opts.max_ticks),
           num_ticks_(static_cast<std::size_t>(max_price_ - min_price_) / tick_size_ + 1),
           bids_(num_ticks_),
-          asks_(num_ticks_) {}
+          asks_(num_ticks_),
+          orders_(opts.expected_orders) {}
 
     // window_low/window_high now saturate rather than wrap (see above), so
     // this should never fire in practice — kept as a hard, non-assert
@@ -184,28 +231,18 @@ private:
         return price >= min_price_ && price <= max_price_;
     }
 
-    // Hard ceiling on ticks-per-side any single grow_to_include() call (or
-    // the initial construction) will ever allocate for, independent of
-    // tick_size_ — this is a property of the class itself, not something
-    // every caller has to remember to clamp the price it grows toward (see
-    // pipeline::BookTraits<LadderBook>::kMaxSanePrice in dispatch_to_book.hpp
-    // for the analogous, but construction-only and caller-side, guard this
-    // complements). At production's tick_size_=100, 8,000,000 ticks per side
-    // covers an $8,000,000 price span — already absurd for a real equity —
-    // while still bounding a single LadderBook's worst-case footprint to a
-    // few hundred MB (2 sides * 8e6 ticks * sizeof(Level)) instead of
-    // whatever an adversarial or corrupt wire price would otherwise demand.
-    static constexpr std::size_t kMaxTicks = 8'000'000;
-
     // Called by add() when `price` falls outside [min_price_, max_price_]:
     // computes a wider range (same window_pct_ this book was built with,
-    // re-centered so it still comfortably covers `price`) and rebuilds the
-    // ladder around it, re-homing every resting order's level at its new
-    // array index. Returns false — refusing to grow, leaving add() to reject
-    // the price exactly as it did before this existed — only when the
-    // resulting range would exceed kMaxTicks; true otherwise, including the
-    // case where growth succeeds but the grid-alignment check right after
-    // this call still rejects the price on its own separate grounds.
+    // re-centered so it still comfortably covers `price`), then widens it
+    // further in the direction of growth so the tick span at least doubles
+    // (geometric growth, capped at max_ticks_), and rebuilds the ladder
+    // around it, re-homing every resting level at its new array index.
+    // Returns false — refusing to grow, leaving add() to reject the price —
+    // only when even the minimal range covering `price` would exceed
+    // max_ticks_ (a property of the class, independent of the caller-side
+    // pipeline::BookTraits<LadderBook>::kMaxSanePrice construction guard);
+    // true otherwise, including the case where growth succeeds but the
+    // grid-alignment check right after this call still rejects the price.
     bool grow_to_include(std::uint32_t price) {
         std::uint32_t new_min = min_price_;
         std::uint32_t new_max = max_price_;
@@ -214,11 +251,25 @@ private:
         if (price > max_price_) new_max = std::max(max_price_, window_high(price, window_pct_));
         if (new_min == min_price_ && new_max == max_price_) return true;  // already covers it
 
+        const std::size_t needed = static_cast<std::size_t>(new_max - new_min) / tick_size_ + 1;
+        if (needed > max_ticks_) return false;
+
+        // Geometric slack: extend toward the side that grew until the span
+        // is at least double the current one, saturating at the uint32
+        // price domain and never past max_ticks_.
+        const std::size_t target = std::min(max_ticks_, std::max(needed, num_ticks_ * 2));
+        const std::uint64_t extra =
+            static_cast<std::uint64_t>(target - needed) * static_cast<std::uint64_t>(tick_size_);
+        if (price < min_price_) {
+            new_min = extra < new_min ? static_cast<std::uint32_t>(new_min - extra) : 0;
+        } else {
+            new_max = static_cast<std::uint32_t>(
+                std::min<std::uint64_t>(static_cast<std::uint64_t>(new_max) + extra, UINT32_MAX));
+        }
         const std::size_t new_num_ticks =
             static_cast<std::size_t>(new_max - new_min) / tick_size_ + 1;
-        if (new_num_ticks > kMaxTicks) return false;
-
         resize_range(new_min, new_max, new_num_ticks);
+        ++ladder_growths_;
         return true;
     }
 
@@ -278,7 +329,8 @@ private:
             // corrupt best_bid/best_ask and depth counts (regression-tested).
             if (l.orders == 0) {
                 --bid_level_count_;
-                if (best_bid_idx_ && *best_bid_idx_ == i) retreat_best_bid();
+                if (bid_level_count_ == 0) best_bid_idx_.reset();  // side empty: no scan
+                else if (best_bid_idx_ && *best_bid_idx_ == i) retreat_best_bid();
             }
         } else {
             Level& l = asks_[i];
@@ -286,7 +338,8 @@ private:
             if (order_gone && l.orders > 0) --l.orders;
             if (l.orders == 0) {
                 --ask_level_count_;
-                if (best_ask_idx_ && *best_ask_idx_ == i) advance_best_ask();
+                if (ask_level_count_ == 0) best_ask_idx_.reset();  // side empty: no scan
+                else if (best_ask_idx_ && *best_ask_idx_ == i) advance_best_ask();
             }
         }
     }
@@ -320,6 +373,7 @@ private:
     std::uint32_t min_price_;
     std::uint32_t max_price_;
     double window_pct_;
+    std::size_t max_ticks_;
     std::size_t num_ticks_;
     std::vector<Level> bids_;
     std::vector<Level> asks_;
@@ -327,6 +381,7 @@ private:
     std::size_t ask_level_count_ = 0;
     std::optional<std::size_t> best_bid_idx_;
     std::optional<std::size_t> best_ask_idx_;
+    std::size_t ladder_growths_ = 0;
     OrderLocator orders_;  // the locator, same type as OrderBook's
 };
 

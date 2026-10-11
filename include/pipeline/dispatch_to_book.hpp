@@ -39,10 +39,19 @@ struct BookTraits<book::LadderBook> {
     // anything outside this bound keeps construction cost bounded and
     // predictable regardless of what the wire hands us.
     static constexpr std::uint32_t kMaxSanePrice = 100'000'000;
+    // Allocation knobs (see book::LadderOptions). The locator starts with
+    // room for kExpectedOrders open orders per symbol and doubles past
+    // that; ladder growth is geometric and capped at kMaxTicks per side.
+    // Both are visible per book through locator_growths()/ladder_growths().
+    static constexpr std::size_t kExpectedOrders = 256;
+    static constexpr std::size_t kMaxTicks = 8'000'000;
     static book::LadderBook make(std::uint32_t price_hint) {
         const std::uint32_t base =
             (price_hint != 0 && price_hint <= kMaxSanePrice) ? price_hint : kFallbackBase;
-        return book::LadderBook(base, kTickSize, kWindowPct);
+        book::LadderOptions opts;
+        opts.expected_orders = kExpectedOrders;
+        opts.max_ticks = kMaxTicks;
+        return book::LadderBook(base, kTickSize, kWindowPct, opts);
     }
 };
 
